@@ -1,0 +1,25 @@
+.reply-token-stats-slot {
+    display: inline-flex;
+    box-sizing: border-box;
+    flex: 0 1 auto;
+    align-items: center;
+    min-width: 0;
+    max-width: 100%;
+    margin-inline-start: 2px;
+    padding: 1px 3px;
+    border-radius: 3px;
+    color: var(--SmartThemeBodyColor, currentColor);
+    background: rgb(127 127 127 / 12%);
+    box-shadow: 0 0 0 1px rgb(127 127 127 / 14%);
+    text-shadow: 0 1px 1px rgb(0 0 0 / 35%), 0 0 1px rgb(255 255 255 / 45%);
+    vertical-align: baseline;
+}
+
+.reply-token-stats {
+    font-size: 10px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    white-space: nowrap;
+}
