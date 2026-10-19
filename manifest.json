@@ -1,0 +1,12 @@
+{
+  "display_name": "Reply Token Stats",
+  "loading_order": 90,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Codex",
+  "version": "0.1.0",
+  "description": "Compact input/output token and generation-speed stats beside assistant names.",
+  "auto_update": false
+}
