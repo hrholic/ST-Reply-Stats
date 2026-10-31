@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { computeRate, elapsedSeconds, makeBodyTagPattern, makeLabel, parseBodyTags, requestOutput, StreamTimer } from '../stats.js';
+import { computeRate, elapsedSeconds, formatBodyTags, makeBodyTagPattern, makeLabel, parseBodyTags, requestOutput, StreamTimer } from '../stats.js';
 
 function timer(tags = ['content', 'context']) {
     const value = new StreamTimer();
@@ -30,6 +30,10 @@ test('supports custom literal tags and escaped regular-expression characters', (
     assert.equal(makeBodyTagPattern(tags).test('<answer.v2 mode="short">'), true);
     assert.equal(makeBodyTagPattern(tags).test('<answerXv2>'), false);
     assert.equal(makeBodyTagPattern(tags).test('<final+>'), true);
+});
+
+test('normalizes spaces and old comma separators for settings', () => {
+    assert.equal(formatBodyTags(' content, context，<answer>\nCONTENT '), 'content context answer');
 });
 
 test('does not match words, partial tags, closing tags, or absent tags', () => {
@@ -88,11 +92,11 @@ test('cancel and a new generation prevent timing from leaking between turns', ()
     assert.equal(value.take({ type: 'swipe', chatId: 'chat-b', messageId: 2 }).tagAt, 2000);
 });
 
-test('display keeps original metrics and adds only the compact thinking field', () => {
-    assert.equal(makeLabel({ input: 12000, output: 860, tps: 32, thinking: 12.34 }),
-        '≈入12k · 出860 · 流32t/s · 思12.3s');
-    assert.equal(makeLabel({ input: 1, output: 2, tps: 3, thinking: null }),
-        '≈入1 · 出2 · 流3t/s · 思—');
+test('display keeps original metrics and adds thinking and total duration', () => {
+    assert.equal(makeLabel({ input: 12000, output: 860, tps: 32, thinking: 8, total: 30 }),
+        '≈入12k · 出860 · 流32t/s · 思8.0s · 总30.0s');
+    assert.equal(makeLabel({ input: 1, output: 2, tps: 3, thinking: null, total: 30 }),
+        '≈入1 · 出2 · 流3t/s · 思— · 总30.0s');
 });
 
 test('original elapsed, rate, and continuation token metrics remain unchanged', () => {

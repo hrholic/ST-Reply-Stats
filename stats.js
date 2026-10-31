@@ -49,7 +49,8 @@ export function makeLabel(stats) {
         ? `流${formatRate(stats.tps)}t/s`
         : '流—t/s';
     const thinking = `思${formatSeconds(stats?.thinking)}`;
-    const values = [input.replace('≈', ''), output.replace('≈', ''), rate, thinking].join(' · ');
+    const total = `总${formatSeconds(stats?.total)}`;
+    const values = [input.replace('≈', ''), output.replace('≈', ''), rate, thinking, total].join(' · ');
     return stats ? `≈${values}` : values;
 }
 
@@ -59,6 +60,7 @@ export function makeTitle(stats) {
         + '输出：SillyTavern 原生 token_count，可能包含思考\n'
         + '流速：原生输出 token ÷ 从请求开始到完成的全部时间\n'
         + '思：与流速相同的生成起点到完整正文开始标签到达；— 表示未观察到标签或没有流式时间证据\n'
+        + '总：与流速相同的生成起点到整条回复完成\n'
         + '思是可观测标签前耗时，不是模型隐藏内部推理时间；≈ 表示估算';
 }
 
@@ -83,7 +85,7 @@ export function requestOutput(total, previousTotal, type) {
 export function parseBodyTags(value) {
     if (typeof value !== 'string') return [];
     const seen = new Set();
-    return value.split(/[,，]/u).map(tag => {
+    return value.split(/[\s,，]+/u).map(tag => {
         const trimmed = tag.trim();
         return /^<\s*([^\s<>/]+)\s*\/?>$/u.exec(trimmed)?.[1] ?? trimmed;
     }).filter(tag => {
@@ -92,6 +94,10 @@ export function parseBodyTags(value) {
         seen.add(key);
         return true;
     });
+}
+
+export function formatBodyTags(value) {
+    return parseBodyTags(value).join(' ');
 }
 
 function escapeRegExp(value) {

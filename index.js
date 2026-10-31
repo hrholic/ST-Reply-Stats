@@ -1,9 +1,9 @@
 import { itemizedPrompts } from '../../../itemized-prompts.js';
-import { computeRate, elapsedSeconds, flattenPrompt, makeLabel, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js';
+import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabel, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js';
 
 const META_KEY = 'reply_token_stats';
 const SETTINGS_KEY = 'st_reply_stats';
-const DEFAULT_BODY_TAGS = 'content,context';
+const DEFAULT_BODY_TAGS = 'content context';
 const IGNORED_TYPES = new Set(['impersonate', 'quiet', 'first_message']);
 const streamTimer = new StreamTimer();
 
@@ -13,9 +13,10 @@ function context() {
 
 function settings() {
     const all = context()?.extensionSettings;
-    if (!all) return { bodyTags: DEFAULT_BODY_TAGS };
+    if (!all) return { bodyTags: DEFAULT_BODY_TAGS, showStats: true };
     const value = all[SETTINGS_KEY] ??= {};
     if (typeof value.bodyTags !== 'string') value.bodyTags = DEFAULT_BODY_TAGS;
+    if (typeof value.showStats !== 'boolean') value.showStats = true;
     return value;
 }
 
@@ -84,9 +85,12 @@ function renderMessage(messageId) {
     const display = slot.querySelector('.reply-token-stats');
 
     const stats = message.extra?.[META_KEY] ?? null;
-    display.textContent = makeLabel(stats);
-    slot.title = makeTitle(stats);
+    const total = elapsedSeconds(message.gen_started, message.gen_finished);
+    const displayStats = (stats || total !== null) ? { ...stats, total: stats?.total ?? total } : null;
+    display.textContent = makeLabel(displayStats);
+    slot.title = makeTitle(displayStats);
     slot.setAttribute('aria-label', slot.title.replaceAll('\n', '；'));
+    slot.style.display = settings().showStats ? '' : 'none';
 }
 
 function renderAll() {
@@ -110,7 +114,7 @@ async function finalizeMessage(messageId, type) {
     const input = await estimateInput(messageId);
     const seconds = elapsedSeconds(message.gen_started, message.gen_finished);
     const thinking = timing?.tagAt == null ? null : elapsedSeconds(message.gen_started, timing.tagAt);
-    const stats = { v: 2, input, output, tps: computeRate(output, seconds), thinking, totalOutput };
+    const stats = { v: 3, input, output, tps: computeRate(output, seconds), thinking, total: seconds, totalOutput };
 
     store(message, stats);
     renderMessage(messageId);
@@ -125,15 +129,23 @@ function deferRenderAll() {
 
 async function editBodyTags() {
     const ctx = context();
-    const value = await ctx?.callGenericPopup?.(
-        '思考链时间',
-        ctx.POPUP_TYPE.INPUT,
-        settings().bodyTags,
-        { placeholder: DEFAULT_BODY_TAGS },
-    );
+    if (!ctx?.Popup || !ctx?.POPUP_TYPE) return;
+    const current = settings();
+    const popup = new ctx.Popup('正文标签（空格分隔）', ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
+        placeholder: DEFAULT_BODY_TAGS,
+        customInputs: [{
+            id: 'reply-token-stats-show',
+            label: '正文显示统计',
+            type: 'checkbox',
+            defaultState: current.showStats,
+        }],
+    });
+    const value = await popup.show();
     if (typeof value !== 'string') return;
-    settings().bodyTags = value;
+    current.bodyTags = formatBodyTags(value);
+    current.showStats = popup.inputResults?.get('reply-token-stats-show') !== false;
     ctx.saveSettingsDebounced?.();
+    renderAll();
 }
 
 function initWandMenu() {
