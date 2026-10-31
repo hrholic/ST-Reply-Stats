@@ -153,7 +153,7 @@ function initWandMenu() {
     item.append(icon, label);
     item.addEventListener('click', editBodyTags);
     container.append(item);
-    menu.append(container);
+    menu.prepend(container);
 }
 
 function init() {

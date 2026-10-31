@@ -42,19 +42,32 @@ test('does not match words, partial tags, closing tags, or absent tags', () => {
     });
 });
 
-test('records a tag that arrives in the first non-empty stream update', () => {
+test('accepts a tag in the first stream update when later stream evidence follows', () => {
     const value = timer();
-    value.update('   ', 900, 5);
     value.update('<content>answer', 1000, 5);
+    value.update('<content>answer continues', 1200, 5);
     const result = value.take({ type: 'normal', chatId: 'chat-a', messageId: 5 });
     assert.equal(result.tagAt, 1000);
 });
 
-test('user sample freezes thinking at content even when the first chunk already contains it', () => {
+test('freezes at the first complete tag across pre-tag, tag, post-tag, and final events', () => {
     const value = timer();
-    value.update('池选取。\n-->\n\n<content>\n湘妃竹杆兼', 4200, 5);
+    value.update('池选取。\n-->', 4000, 5);
+    value.update('池选取。\n-->\n\n<content>\n湘妃', 8000, 5);
+    assert.equal(value.current.tagAt, 8000);
+    value.update('池选取。\n-->\n\n<content>\n湘妃竹杆兼', 20000, 5);
+    assert.equal(value.current.tagAt, 8000);
+    value.update('池选取。\n-->\n\n<content>\n湘妃竹杆兼，正文结束。', 30000, 5);
+    assert.equal(value.current.tagAt, 8000);
     const result = value.take({ type: 'normal', chatId: 'chat-a', messageId: 5 });
-    assert.equal(elapsedSeconds(1000, result.tagAt), 3.2);
+    assert.equal(elapsedSeconds(0, result.tagAt), 8);
+});
+
+test('does not use a lone final full-text event as the tag arrival time', () => {
+    const value = timer();
+    value.update('池选取。\n-->\n\n<content>\n完整正文', 30000, 5);
+    value.update('池选取。\n-->\n\n<content>\n完整正文', 30100, 5);
+    assert.equal(value.take({ type: 'normal', chatId: 'chat-a', messageId: 5 }).tagAt, null);
 });
 
 test('cancel and a new generation prevent timing from leaking between turns', () => {
@@ -64,14 +77,15 @@ test('cancel and a new generation prevent timing from leaking between turns', ()
     assert.equal(value.take({ type: 'normal', chatId: 'chat-a', messageId: 1 }), null);
     value.start({ type: 'swipe', chatId: 'chat-b', tags: ['content'] });
     value.update('new <content>', 2000, 2);
+    value.update('new <content> body', 2100, 2);
     assert.equal(value.take({ type: 'swipe', chatId: 'chat-b', messageId: 2 }).tagAt, 2000);
 });
 
 test('display keeps original metrics and adds only the compact thinking field', () => {
     assert.equal(makeLabel({ input: 12000, output: 860, tps: 32, thinking: 12.34 }),
-        '≈入12k·出860·流32t/s·思 12.3s');
+        '≈入12k · 出860 · 流32t/s · 思12.3s');
     assert.equal(makeLabel({ input: 1, output: 2, tps: 3, thinking: null }),
-        '≈入1·出2·流3t/s·思 —');
+        '≈入1 · 出2 · 流3t/s · 思—');
 });
 
 test('original elapsed, rate, and continuation token metrics remain unchanged', () => {

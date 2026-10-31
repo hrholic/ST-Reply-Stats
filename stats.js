@@ -48,8 +48,8 @@ export function makeLabel(stats) {
     const rate = Number.isFinite(stats?.tps) && stats.tps >= 0
         ? `流${formatRate(stats.tps)}t/s`
         : '流—t/s';
-    const thinking = `思 ${formatSeconds(stats?.thinking)}`;
-    const values = `${input.replace('≈', '')}·${output.replace('≈', '')}·${rate}·${thinking}`;
+    const thinking = `思${formatSeconds(stats?.thinking)}`;
+    const values = [input.replace('≈', ''), output.replace('≈', ''), rate, thinking].join(' · ');
     return stats ? `≈${values}` : values;
 }
 
@@ -111,6 +111,8 @@ export class StreamTimer {
             chatId,
             messageId: null,
             tagAt: null,
+            sawPreTagText: false,
+            sawPostTagText: false,
             text: '',
             lastValue: '',
             pattern: makeBodyTagPattern(tags),
@@ -119,14 +121,23 @@ export class StreamTimer {
 
     update(value, now = Date.now(), messageId = null) {
         const run = this.current;
-        if (!run || typeof value !== 'string' || !/\S/u.test(value)) return;
+        if (!run || typeof value !== 'string') return;
 
         if (Number.isSafeInteger(messageId) && messageId >= 0) run.messageId ??= messageId;
-        if (run.tagAt !== null || !run.pattern) return;
+        if (!/\S/u.test(value) || !run.pattern) return;
 
+        const changed = value !== run.lastValue;
         run.text = run.lastValue && value.startsWith(run.lastValue) ? value : run.text + value;
         run.lastValue = value;
-        if (run.pattern.test(run.text)) run.tagAt = now;
+        if (run.tagAt !== null) {
+            if (changed) run.sawPostTagText = true;
+            return;
+        }
+        if (run.pattern.test(run.text)) {
+            run.tagAt = now;
+        } else {
+            run.sawPreTagText = true;
+        }
     }
 
     take({ type, chatId, messageId }) {
@@ -135,7 +146,8 @@ export class StreamTimer {
         if (!run || run.type !== type) return null;
         if (run.chatId != null && chatId != null && String(run.chatId) !== String(chatId)) return null;
         if (run.messageId != null && Number(run.messageId) !== Number(messageId)) return null;
-        return { tagAt: run.tagAt };
+        const hasStreamEvidence = run.sawPreTagText || run.sawPostTagText;
+        return { tagAt: hasStreamEvidence ? run.tagAt : null };
     }
 
     cancel() {
