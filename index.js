@@ -1,11 +1,22 @@
 import { itemizedPrompts } from '../../../itemized-prompts.js';
-import { computeRate, elapsedSeconds, flattenPrompt, makeLabel, makeTitle, requestOutput } from './stats.js';
+import { computeRate, elapsedSeconds, flattenPrompt, makeLabel, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js';
 
 const META_KEY = 'reply_token_stats';
+const SETTINGS_KEY = 'st_reply_stats';
+const DEFAULT_BODY_TAGS = 'content,context';
 const IGNORED_TYPES = new Set(['impersonate', 'quiet', 'first_message']);
+const streamTimer = new StreamTimer();
 
 function context() {
     return globalThis.SillyTavern?.getContext?.();
+}
+
+function settings() {
+    const all = context()?.extensionSettings;
+    if (!all) return { bodyTags: DEFAULT_BODY_TAGS };
+    const value = all[SETTINGS_KEY] ??= {};
+    if (typeof value.bodyTags !== 'string') value.bodyTags = DEFAULT_BODY_TAGS;
+    return value;
 }
 
 async function tokenCount(text) {
@@ -88,6 +99,8 @@ async function finalizeMessage(messageId, type) {
     const message = ctx?.chat?.[messageId];
     if (!isAssistantMessage(message) || IGNORED_TYPES.has(type)) return;
 
+    const timing = streamTimer.take({ type, chatId: ctx.chatId, messageId });
+
     const previousStats = message.extra?.[META_KEY];
     const nativeOutput = message.extra?.token_count;
     const totalOutput = Number.isSafeInteger(nativeOutput) && nativeOutput >= 0
@@ -96,7 +109,11 @@ async function finalizeMessage(messageId, type) {
     const output = requestOutput(totalOutput, previousStats?.totalOutput, type);
     const input = await estimateInput(messageId);
     const seconds = elapsedSeconds(message.gen_started, message.gen_finished);
-    const stats = { v: 1, input, output, tps: computeRate(output, seconds), totalOutput };
+    const first = timing?.firstAt == null ? null : elapsedSeconds(message.gen_started, timing.firstAt);
+    const thinking = timing?.firstAt == null || timing.tagAt == null
+        ? null
+        : elapsedSeconds(timing.firstAt, timing.tagAt);
+    const stats = { v: 2, input, output, tps: computeRate(output, seconds), first, thinking, totalOutput };
 
     store(message, stats);
     renderMessage(messageId);
@@ -109,6 +126,29 @@ function deferRenderAll() {
     requestAnimationFrame(renderAll);
 }
 
+function initSettings() {
+    const host = document.querySelector('#extensions_settings');
+    if (!host || document.querySelector('#reply-token-stats-settings')) return;
+
+    const row = document.createElement('div');
+    row.id = 'reply-token-stats-settings';
+    row.className = 'reply-token-stats-settings';
+    const label = document.createElement('label');
+    label.htmlFor = 'reply-token-stats-body-tags';
+    label.textContent = '正文标签';
+    const input = document.createElement('input');
+    input.id = 'reply-token-stats-body-tags';
+    input.type = 'text';
+    input.value = settings().bodyTags;
+    input.placeholder = DEFAULT_BODY_TAGS;
+    input.addEventListener('input', () => {
+        settings().bodyTags = input.value;
+        context()?.saveSettingsDebounced?.();
+    });
+    row.append(label, input);
+    host.append(row);
+}
+
 function init() {
     const ctx = context();
     if (!ctx?.eventSource || !ctx?.eventTypes) {
@@ -117,13 +157,29 @@ function init() {
     }
 
     const { eventSource, eventTypes } = ctx;
+    eventSource.on(eventTypes.GENERATION_STARTED, (type, _options, dryRun) => {
+        if (dryRun || IGNORED_TYPES.has(type)) {
+            streamTimer.cancel();
+            return;
+        }
+        streamTimer.start({ type, chatId: context()?.chatId, tags: parseBodyTags(settings().bodyTags) });
+    });
+    eventSource.on(eventTypes.STREAM_TOKEN_RECEIVED, text => {
+        streamTimer.update(text, Date.now(), context()?.streamingProcessor?.messageId);
+    });
+    eventSource.on(eventTypes.GENERATION_STOPPED, () => streamTimer.cancel());
     eventSource.on(eventTypes.MESSAGE_RECEIVED, finalizeMessage);
     eventSource.on(eventTypes.CHARACTER_MESSAGE_RENDERED, renderMessage);
     eventSource.on(eventTypes.MESSAGE_SWIPED, renderMessage);
     eventSource.on(eventTypes.MESSAGE_UPDATED, renderMessage);
-    eventSource.on(eventTypes.CHAT_CHANGED, deferRenderAll);
+    eventSource.on(eventTypes.CHAT_CHANGED, () => {
+        streamTimer.cancel();
+        deferRenderAll();
+    });
     eventSource.on(eventTypes.CHAT_LOADED, deferRenderAll);
     eventSource.on(eventTypes.MORE_MESSAGES_LOADED, deferRenderAll);
+    eventSource.on(eventTypes.APP_READY, initSettings);
+    initSettings();
     renderAll();
 }
 

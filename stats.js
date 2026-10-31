@@ -34,6 +34,10 @@ export function formatRate(value) {
     return String(Math.round(value * 100) / 100);
 }
 
+export function formatSeconds(value) {
+    return Number.isFinite(value) && value >= 0 ? `${value.toFixed(1)}s` : '—';
+}
+
 function metric(label, value) {
     return Number.isFinite(value) && value >= 0 ? `${label}≈${formatCount(value)}` : `${label}—`;
 }
@@ -44,7 +48,9 @@ export function makeLabel(stats) {
     const rate = Number.isFinite(stats?.tps) && stats.tps >= 0
         ? `流${formatRate(stats.tps)}t/s`
         : '流—t/s';
-    const values = `${input.replace('≈', '')}·${output.replace('≈', '')}·${rate}`;
+    const first = `首${formatSeconds(stats?.first)}`;
+    const thinking = `思 ${formatSeconds(stats?.thinking)}`;
+    const values = `${input.replace('≈', '')}·${output.replace('≈', '')}·${rate}·${first}·${thinking}`;
     return stats ? `≈${values}` : values;
 }
 
@@ -53,13 +59,15 @@ export function makeTitle(stats) {
     return '输入：SillyTavern 当前 itemization 本地估算\n'
         + '输出：SillyTavern 原生 token_count，可能包含思考\n'
         + '流速：原生输出 token ÷ 从请求开始到完成的全部时间\n'
-        + '≈ 表示估算；未使用流式 chunk 数量代替 token 数量';
+        + '首字：生成开始到首次非空流输出\n'
+        + '思：首次非空流输出到完整正文开始标签到达；— 表示未观察到标签或没有流式时间证据\n'
+        + '思是可观测标签前耗时，不是模型隐藏内部推理时间；≈ 表示估算';
 }
 
 export function elapsedSeconds(start, finish) {
     const startMs = new Date(start).getTime();
     const finishMs = new Date(finish).getTime();
-    if (!Number.isFinite(startMs) || !Number.isFinite(finishMs) || finishMs <= startMs) return null;
+    if (!Number.isFinite(startMs) || !Number.isFinite(finishMs) || finishMs < startMs) return null;
     return (finishMs - startMs) / 1000;
 }
 
@@ -72,4 +80,69 @@ export function requestOutput(total, previousTotal, type) {
     if (!Number.isSafeInteger(total) || total < 0) return null;
     if (type !== 'continue') return total;
     return Number.isSafeInteger(previousTotal) && total >= previousTotal ? total - previousTotal : null;
+}
+
+export function parseBodyTags(value) {
+    if (typeof value !== 'string') return [];
+    const seen = new Set();
+    return value.split(/[,，]/u).map(tag => tag.trim()).filter(tag => {
+        const key = tag.toLowerCase();
+        if (!tag || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function makeBodyTagPattern(tags) {
+    const names = tags.map(escapeRegExp).join('|');
+    return names
+        ? new RegExp(`<\\s*(?:${names})(?=\\s|/?>)(?:\\s[^<>]*?)?\\s*/?>`, 'iu')
+        : null;
+}
+
+export class StreamTimer {
+    current = null;
+
+    start({ type, chatId, tags }) {
+        this.current = {
+            type,
+            chatId,
+            messageId: null,
+            firstAt: null,
+            tagAt: null,
+            text: '',
+            lastValue: '',
+            pattern: makeBodyTagPattern(tags),
+        };
+    }
+
+    update(value, now = Date.now(), messageId = null) {
+        const run = this.current;
+        if (!run || typeof value !== 'string' || !/\S/u.test(value)) return;
+
+        run.firstAt ??= now;
+        if (Number.isSafeInteger(messageId) && messageId >= 0) run.messageId ??= messageId;
+        if (run.tagAt !== null || !run.pattern) return;
+
+        run.text = run.lastValue && value.startsWith(run.lastValue) ? value : run.text + value;
+        run.lastValue = value;
+        if (run.pattern.test(run.text)) run.tagAt = now;
+    }
+
+    take({ type, chatId, messageId }) {
+        const run = this.current;
+        this.current = null;
+        if (!run || run.type !== type) return null;
+        if (run.chatId != null && chatId != null && String(run.chatId) !== String(chatId)) return null;
+        if (run.messageId != null && Number(run.messageId) !== Number(messageId)) return null;
+        return { firstAt: run.firstAt, tagAt: run.tagAt };
+    }
+
+    cancel() {
+        this.current = null;
+    }
 }
