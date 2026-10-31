@@ -126,7 +126,7 @@ function deferRenderAll() {
 async function editBodyTags() {
     const ctx = context();
     const value = await ctx?.callGenericPopup?.(
-        '正文标签',
+        '思考链时间',
         ctx.POPUP_TYPE.INPUT,
         settings().bodyTags,
         { placeholder: DEFAULT_BODY_TAGS },
@@ -149,7 +149,7 @@ function initWandMenu() {
     const icon = document.createElement('div');
     icon.className = 'fa-solid fa-tag extensionsMenuExtensionButton';
     const label = document.createElement('span');
-    label.textContent = '正文标签';
+    label.textContent = '思考链时间';
     item.append(icon, label);
     item.addEventListener('click', editBodyTags);
     container.append(item);

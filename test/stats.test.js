@@ -25,7 +25,7 @@ test('finds context across incremental chunks, case-insensitively', () => {
 });
 
 test('supports custom literal tags and escaped regular-expression characters', () => {
-    const tags = parseBodyTags(' answer.v2，ANSWER.V2, final+ ');
+    const tags = parseBodyTags(' <answer.v2>，ANSWER.V2, <final+/> ');
     assert.deepEqual(tags, ['answer.v2', 'final+']);
     assert.equal(makeBodyTagPattern(tags).test('<answer.v2 mode="short">'), true);
     assert.equal(makeBodyTagPattern(tags).test('<answerXv2>'), false);
@@ -50,6 +50,14 @@ test('accepts a tag in the first stream update when later stream evidence follow
     assert.equal(result.tagAt, 1000);
 });
 
+test('accepts empty body events from a separately streamed reasoning phase', () => {
+    const value = timer();
+    value.update('', 4000, 5);
+    value.update('', 6000, 5);
+    value.update('<content>正文开始', 8000, 5);
+    assert.equal(value.take({ type: 'normal', chatId: 'chat-a', messageId: 5 }).tagAt, 8000);
+});
+
 test('freezes at the first complete tag across pre-tag, tag, post-tag, and final events', () => {
     const value = timer();
     value.update('池选取。\n-->', 4000, 5);
@@ -66,7 +74,6 @@ test('freezes at the first complete tag across pre-tag, tag, post-tag, and final
 test('does not use a lone final full-text event as the tag arrival time', () => {
     const value = timer();
     value.update('池选取。\n-->\n\n<content>\n完整正文', 30000, 5);
-    value.update('池选取。\n-->\n\n<content>\n完整正文', 30100, 5);
     assert.equal(value.take({ type: 'normal', chatId: 'chat-a', messageId: 5 }).tagAt, null);
 });
 

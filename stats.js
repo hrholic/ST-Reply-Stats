@@ -83,7 +83,10 @@ export function requestOutput(total, previousTotal, type) {
 export function parseBodyTags(value) {
     if (typeof value !== 'string') return [];
     const seen = new Set();
-    return value.split(/[,，]/u).map(tag => tag.trim()).filter(tag => {
+    return value.split(/[,，]/u).map(tag => {
+        const trimmed = tag.trim();
+        return /^<\s*([^\s<>/]+)\s*\/?>$/u.exec(trimmed)?.[1] ?? trimmed;
+    }).filter(tag => {
         const key = tag.toLowerCase();
         if (!tag || seen.has(key)) return false;
         seen.add(key);
@@ -110,9 +113,8 @@ export class StreamTimer {
             type,
             chatId,
             messageId: null,
+            eventCount: 0,
             tagAt: null,
-            sawPreTagText: false,
-            sawPostTagText: false,
             text: '',
             lastValue: '',
             pattern: makeBodyTagPattern(tags),
@@ -123,20 +125,14 @@ export class StreamTimer {
         const run = this.current;
         if (!run || typeof value !== 'string') return;
 
+        run.eventCount += 1;
         if (Number.isSafeInteger(messageId) && messageId >= 0) run.messageId ??= messageId;
-        if (!/\S/u.test(value) || !run.pattern) return;
+        if (!/\S/u.test(value) || run.tagAt !== null || !run.pattern) return;
 
-        const changed = value !== run.lastValue;
         run.text = run.lastValue && value.startsWith(run.lastValue) ? value : run.text + value;
         run.lastValue = value;
-        if (run.tagAt !== null) {
-            if (changed) run.sawPostTagText = true;
-            return;
-        }
         if (run.pattern.test(run.text)) {
             run.tagAt = now;
-        } else {
-            run.sawPreTagText = true;
         }
     }
 
@@ -146,8 +142,7 @@ export class StreamTimer {
         if (!run || run.type !== type) return null;
         if (run.chatId != null && chatId != null && String(run.chatId) !== String(chatId)) return null;
         if (run.messageId != null && Number(run.messageId) !== Number(messageId)) return null;
-        const hasStreamEvidence = run.sawPreTagText || run.sawPostTagText;
-        return { tagAt: hasStreamEvidence ? run.tagAt : null };
+        return { tagAt: run.eventCount > 1 ? run.tagAt : null };
     }
 
     cancel() {
