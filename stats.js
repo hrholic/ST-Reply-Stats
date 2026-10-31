@@ -48,9 +48,8 @@ export function makeLabel(stats) {
     const rate = Number.isFinite(stats?.tps) && stats.tps >= 0
         ? `流${formatRate(stats.tps)}t/s`
         : '流—t/s';
-    const first = `首${formatSeconds(stats?.first)}`;
     const thinking = `思 ${formatSeconds(stats?.thinking)}`;
-    const values = `${input.replace('≈', '')}·${output.replace('≈', '')}·${rate}·${first}·${thinking}`;
+    const values = `${input.replace('≈', '')}·${output.replace('≈', '')}·${rate}·${thinking}`;
     return stats ? `≈${values}` : values;
 }
 
@@ -59,8 +58,7 @@ export function makeTitle(stats) {
     return '输入：SillyTavern 当前 itemization 本地估算\n'
         + '输出：SillyTavern 原生 token_count，可能包含思考\n'
         + '流速：原生输出 token ÷ 从请求开始到完成的全部时间\n'
-        + '首字：生成开始到首次非空流输出\n'
-        + '思：首次非空流输出到完整正文开始标签到达；— 表示未观察到标签或没有流式时间证据\n'
+        + '思：与流速相同的生成起点到完整正文开始标签到达；— 表示未观察到标签或没有流式时间证据\n'
         + '思是可观测标签前耗时，不是模型隐藏内部推理时间；≈ 表示估算';
 }
 
@@ -112,7 +110,6 @@ export class StreamTimer {
             type,
             chatId,
             messageId: null,
-            firstAt: null,
             tagAt: null,
             text: '',
             lastValue: '',
@@ -124,7 +121,6 @@ export class StreamTimer {
         const run = this.current;
         if (!run || typeof value !== 'string' || !/\S/u.test(value)) return;
 
-        run.firstAt ??= now;
         if (Number.isSafeInteger(messageId) && messageId >= 0) run.messageId ??= messageId;
         if (run.tagAt !== null || !run.pattern) return;
 
@@ -139,7 +135,7 @@ export class StreamTimer {
         if (!run || run.type !== type) return null;
         if (run.chatId != null && chatId != null && String(run.chatId) !== String(chatId)) return null;
         if (run.messageId != null && Number(run.messageId) !== Number(messageId)) return null;
-        return { firstAt: run.firstAt, tagAt: run.tagAt };
+        return { tagAt: run.tagAt };
     }
 
     cancel() {

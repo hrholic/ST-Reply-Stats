@@ -13,7 +13,6 @@ test('finds default tags across cumulative stream updates', () => {
     value.update('thinking <con', 1000, 7);
     value.update('thinking <content>', 2300, 7);
     assert.deepEqual(value.take({ type: 'normal', chatId: 'chat-a', messageId: 7 }), {
-        firstAt: 1000,
         tagAt: 2300,
     });
 });
@@ -39,17 +38,23 @@ test('does not match words, partial tags, closing tags, or absent tags', () => {
     const value = timer();
     value.update('plain answer without a body tag', 1000, 3);
     assert.deepEqual(value.take({ type: 'normal', chatId: 'chat-a', messageId: 3 }), {
-        firstAt: 1000,
         tagAt: null,
     });
 });
 
-test('tag in the first non-empty stream update records zero observable thinking time', () => {
+test('records a tag that arrives in the first non-empty stream update', () => {
     const value = timer();
     value.update('   ', 900, 5);
     value.update('<content>answer', 1000, 5);
     const result = value.take({ type: 'normal', chatId: 'chat-a', messageId: 5 });
-    assert.equal((result.tagAt - result.firstAt) / 1000, 0);
+    assert.equal(result.tagAt, 1000);
+});
+
+test('user sample freezes thinking at content even when the first chunk already contains it', () => {
+    const value = timer();
+    value.update('池选取。\n-->\n\n<content>\n湘妃竹杆兼', 4200, 5);
+    const result = value.take({ type: 'normal', chatId: 'chat-a', messageId: 5 });
+    assert.equal(elapsedSeconds(1000, result.tagAt), 3.2);
 });
 
 test('cancel and a new generation prevent timing from leaking between turns', () => {
@@ -59,14 +64,14 @@ test('cancel and a new generation prevent timing from leaking between turns', ()
     assert.equal(value.take({ type: 'normal', chatId: 'chat-a', messageId: 1 }), null);
     value.start({ type: 'swipe', chatId: 'chat-b', tags: ['content'] });
     value.update('new <content>', 2000, 2);
-    assert.equal(value.take({ type: 'swipe', chatId: 'chat-b', messageId: 2 }).firstAt, 2000);
+    assert.equal(value.take({ type: 'swipe', chatId: 'chat-b', messageId: 2 }).tagAt, 2000);
 });
 
-test('display keeps original metrics and adds compact first/thinking fields', () => {
-    assert.equal(makeLabel({ input: 12000, output: 860, tps: 32, first: 1.24, thinking: 12.34 }),
-        '≈入12k·出860·流32t/s·首1.2s·思 12.3s');
-    assert.equal(makeLabel({ input: 1, output: 2, tps: 3, first: null, thinking: null }),
-        '≈入1·出2·流3t/s·首—·思 —');
+test('display keeps original metrics and adds only the compact thinking field', () => {
+    assert.equal(makeLabel({ input: 12000, output: 860, tps: 32, thinking: 12.34 }),
+        '≈入12k·出860·流32t/s·思 12.3s');
+    assert.equal(makeLabel({ input: 1, output: 2, tps: 3, thinking: null }),
+        '≈入1·出2·流3t/s·思 —');
 });
 
 test('original elapsed, rate, and continuation token metrics remain unchanged', () => {

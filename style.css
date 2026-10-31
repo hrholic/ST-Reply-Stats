@@ -23,13 +23,3 @@
     letter-spacing: -0.02em;
     white-space: nowrap;
 }
-
-.reply-token-stats-settings {
-    display: grid;
-    gap: 4px;
-    margin: 8px 0;
-}
-
-.reply-token-stats-settings input {
-    width: 100%;
-}

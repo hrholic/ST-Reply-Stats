@@ -109,11 +109,8 @@ async function finalizeMessage(messageId, type) {
     const output = requestOutput(totalOutput, previousStats?.totalOutput, type);
     const input = await estimateInput(messageId);
     const seconds = elapsedSeconds(message.gen_started, message.gen_finished);
-    const first = timing?.firstAt == null ? null : elapsedSeconds(message.gen_started, timing.firstAt);
-    const thinking = timing?.firstAt == null || timing.tagAt == null
-        ? null
-        : elapsedSeconds(timing.firstAt, timing.tagAt);
-    const stats = { v: 2, input, output, tps: computeRate(output, seconds), first, thinking, totalOutput };
+    const thinking = timing?.tagAt == null ? null : elapsedSeconds(message.gen_started, timing.tagAt);
+    const stats = { v: 2, input, output, tps: computeRate(output, seconds), thinking, totalOutput };
 
     store(message, stats);
     renderMessage(messageId);
@@ -126,27 +123,37 @@ function deferRenderAll() {
     requestAnimationFrame(renderAll);
 }
 
-function initSettings() {
-    const host = document.querySelector('#extensions_settings');
-    if (!host || document.querySelector('#reply-token-stats-settings')) return;
+async function editBodyTags() {
+    const ctx = context();
+    const value = await ctx?.callGenericPopup?.(
+        '正文标签',
+        ctx.POPUP_TYPE.INPUT,
+        settings().bodyTags,
+        { placeholder: DEFAULT_BODY_TAGS },
+    );
+    if (typeof value !== 'string') return;
+    settings().bodyTags = value;
+    ctx.saveSettingsDebounced?.();
+}
 
-    const row = document.createElement('div');
-    row.id = 'reply-token-stats-settings';
-    row.className = 'reply-token-stats-settings';
-    const label = document.createElement('label');
-    label.htmlFor = 'reply-token-stats-body-tags';
+function initWandMenu() {
+    const menu = document.querySelector('#extensionsMenu');
+    if (!menu || document.querySelector('#reply-token-stats-wand-container')) return;
+
+    const container = document.createElement('div');
+    container.id = 'reply-token-stats-wand-container';
+    container.className = 'extension_container';
+    const item = document.createElement('div');
+    item.id = 'reply-token-stats-body-tags';
+    item.className = 'list-group-item flex-container flexGap5';
+    const icon = document.createElement('div');
+    icon.className = 'fa-solid fa-tag extensionsMenuExtensionButton';
+    const label = document.createElement('span');
     label.textContent = '正文标签';
-    const input = document.createElement('input');
-    input.id = 'reply-token-stats-body-tags';
-    input.type = 'text';
-    input.value = settings().bodyTags;
-    input.placeholder = DEFAULT_BODY_TAGS;
-    input.addEventListener('input', () => {
-        settings().bodyTags = input.value;
-        context()?.saveSettingsDebounced?.();
-    });
-    row.append(label, input);
-    host.append(row);
+    item.append(icon, label);
+    item.addEventListener('click', editBodyTags);
+    container.append(item);
+    menu.append(container);
 }
 
 function init() {
@@ -178,8 +185,8 @@ function init() {
     });
     eventSource.on(eventTypes.CHAT_LOADED, deferRenderAll);
     eventSource.on(eventTypes.MORE_MESSAGES_LOADED, deferRenderAll);
-    eventSource.on(eventTypes.APP_READY, initSettings);
-    initSettings();
+    eventSource.on(eventTypes.APP_READY, initWandMenu);
+    initWandMenu();
     renderAll();
 }
 
