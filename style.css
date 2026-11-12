@@ -23,3 +23,7 @@
     letter-spacing: -0.02em;
     white-space: nowrap;
 }
+
+.reply-token-stats .reply-token-stats-rate-high {
+    color: #ff4d4f;
+}

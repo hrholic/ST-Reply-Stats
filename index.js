@@ -1,5 +1,5 @@
 import { itemizedPrompts } from '../../../itemized-prompts.js';
-import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabel, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js';
+import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js';
 
 const META_KEY = 'reply_token_stats';
 const SETTINGS_KEY = 'st_reply_stats';
@@ -87,7 +87,13 @@ function renderMessage(messageId) {
     const stats = message.extra?.[META_KEY] ?? null;
     const total = elapsedSeconds(message.gen_started, message.gen_finished);
     const displayStats = (stats || total !== null) ? { ...stats, total: stats?.total ?? total } : null;
-    display.textContent = makeLabel(displayStats);
+    const [beforeRate, rate, afterRate] = makeLabelParts(displayStats);
+    const rateValue = document.createElement('span');
+    rateValue.textContent = rate;
+    if (Number.isFinite(displayStats?.tps) && displayStats.tps > 80) {
+        rateValue.className = 'reply-token-stats-rate-high';
+    }
+    display.replaceChildren(beforeRate, rateValue, afterRate);
     slot.title = makeTitle(displayStats);
     slot.setAttribute('aria-label', slot.title.replaceAll('\n', '；'));
     slot.style.display = settings().showStats ? '' : 'none';

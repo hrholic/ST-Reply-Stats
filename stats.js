@@ -42,16 +42,18 @@ function metric(label, value) {
     return Number.isFinite(value) && value >= 0 ? `${label}≈${formatCount(value)}` : `${label}—`;
 }
 
-export function makeLabel(stats) {
+export function makeLabelParts(stats) {
     const input = metric('入', stats?.input);
     const output = metric('出', stats?.output);
-    const rate = Number.isFinite(stats?.tps) && stats.tps >= 0
-        ? `流${formatRate(stats.tps)}t/s`
-        : '流—t/s';
+    const rate = formatRate(stats?.tps);
     const thinking = `思${formatSeconds(stats?.thinking)}`;
     const total = `总${formatSeconds(stats?.total)}`;
-    const values = [input.replace('≈', ''), output.replace('≈', ''), rate, thinking, total].join(' · ');
-    return stats ? `≈${values}` : values;
+    const prefix = [input.replace('≈', ''), output.replace('≈', '')].join(' · ');
+    return [`${stats ? '≈' : ''}${prefix} · 流`, rate, `t/s · ${thinking} · ${total}`];
+}
+
+export function makeLabel(stats) {
+    return makeLabelParts(stats).join('');
 }
 
 export function makeTitle(stats) {
