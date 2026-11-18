@@ -1,0 +1,34 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { AutoRetry, retryLimit } from '../auto-retry.js';
+function fixture() {
+    let ctx={characterId:1,chatId:'a',chat:[{is_user:true,mes:'hi'},{is_user:false,mes:'fast',swipes:['old','fast'],swipe_id:1}],printMessages:async()=>{},saveChat:async()=>{}};
+    const data=new Map(), tasks=[]; let calls=0, busy=false, enabled=true, limit=1;
+    const storage={getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v)};
+    const retry=new AutoRetry({context:()=>ctx,enabled:()=>enabled,limit:()=>limit,storage,busy:()=>busy,regenerate:()=>{calls++;retry.start('regenerate',false);},notify:()=>{},schedule:fn=>tasks.push(fn)});
+    const propose=(rate=81)=>{retry.start('normal',false);retry.consider(retry.run,1,ctx.chat[1],rate);retry.end();};
+    return {retry,storage,data,tasks,propose,get ctx(){return ctx;},set ctx(v){ctx=v;},get calls(){return calls;},set limit(v){limit=v;},set busy(v){busy=v;},set enabled(v){enabled=v;},flush:()=>tasks.splice(0).forEach(f=>f())};
+}
+test('strictly above 80, completion only, duplicate events only once',()=>{const f=fixture();f.propose(80);f.flush();assert.equal(f.calls,0);f.propose();f.retry.end();f.flush();assert.equal(f.calls,1);assert.deepEqual(JSON.parse([...f.data.values()][0])[0].message.swipes,['old','fast']);});
+test('generated retry cannot loop',()=>{const f=fixture();f.propose();f.flush();f.retry.consider(f.retry.run,1,f.ctx.chat[1],100);f.retry.end();f.flush();assert.equal(f.calls,1);});
+test('new manual generation may retry again, previous backups retained',()=>{const f=fixture();f.propose();f.flush();f.propose();f.flush();assert.equal(f.calls,2);assert.equal(JSON.parse([...f.data.values()][0]).length,2);});
+for(const [name,change] of Object.entries({chat:f=>{f.ctx={...f.ctx,chatId:'b'};},latest:f=>f.ctx.chat.push({is_user:true,mes:'new'}),edited:f=>{f.ctx.chat[1].mes='edited';},stopped:f=>f.retry.cancel(),busy:f=>{f.busy=true;},disabled:f=>{f.enabled=false;},replaced:f=>{f.ctx.chat[1]={...f.ctx.chat[1]};}})) test(`no deletion when ${name}`,()=>{const f=fixture();f.propose();change(f);f.flush();assert.equal(f.calls,0);assert.equal(f.data.size,0);});
+test('storage failure never deletes',()=>{const f=fixture();f.storage.setItem=()=>{throw Error('full');};f.propose();f.flush();assert.equal(f.calls,0);});
+test('storage readback mismatch never deletes',()=>{const f=fixture();f.storage.setItem=()=>{};f.propose();f.flush();assert.equal(f.calls,0);});
+test('restoring preserves replacement and old swipes',async()=>{const f=fixture();f.propose();f.flush();f.ctx.chat[1]={is_user:false,mes:'replacement'};await f.retry.restore();assert.equal(f.ctx.chat[1].mes,'fast');assert.deepEqual(f.ctx.chat[1].swipes,['old','fast']);assert.equal(JSON.parse([...f.data.values()][0]).at(-1).message.mes,'replacement');});
+test('restore refuses to overwrite later conversation',async()=>{const f=fixture();f.propose();f.flush();f.ctx.chat.push({is_user:true,mes:'next'});await assert.rejects(()=>f.retry.restore());assert.equal(f.ctx.chat.at(-1).mes,'next');});
+test('restore works after generation failed and left missing last reply',async()=>{const f=fixture();f.propose();f.flush();f.ctx.chat.pop();await f.retry.restore();assert.equal(f.ctx.chat.at(-1).mes,'fast');});
+test('ignores continuation, quiet, dry-run, group and unknown rates',()=>{const f=fixture();for(const type of ['continue','quiet','impersonate']){f.retry.start(type,false);assert.equal(f.retry.run,null);}f.retry.start('normal',true);assert.equal(f.retry.run,null);f.ctx.groupId='g';f.retry.start('normal',false);assert.equal(f.retry.run,null);delete f.ctx.groupId;f.propose(NaN);f.flush();assert.equal(f.calls,0);});
+test('late token estimation cannot act on another generation',()=>{const f=fixture();f.retry.start('normal',false);const old=f.retry.run;f.retry.start('normal',false);f.retry.consider(old,1,f.ctx.chat[1],90);f.retry.end();f.flush();assert.equal(f.calls,0);});
+
+test('configurable 3 retries stop exactly at cap and preserve every deleted reply',()=>{
+ const f=fixture();f.limit=3;f.propose();f.flush();
+ for(let i=0;i<3;i++){f.ctx.chat[1]={is_user:false,mes:'retry'+i};f.retry.consider(f.retry.run,1,f.ctx.chat[1],99);f.retry.end();f.flush();}
+ assert.equal(f.calls,3);assert.equal(JSON.parse([...f.data.values()][0]).length,3);
+});
+test('chain stops when rate is acceptable',()=>{const f=fixture();f.limit=3;f.propose();f.flush();f.retry.consider(f.retry.run,1,f.ctx.chat[1],80);f.retry.end();f.flush();assert.equal(f.calls,1);});
+test('changed cap and stop cancel queued repeated retries',()=>{const f=fixture();f.limit=3;f.propose();f.flush();f.retry.consider(f.retry.run,1,f.ctx.chat[1],99);f.retry.end();f.limit=1;f.flush();assert.equal(f.calls,1);});
+test('manual start resets retry budget',()=>{const f=fixture();f.limit=2;f.propose();f.flush();f.retry.consider(f.retry.run,1,f.ctx.chat[1],99);f.retry.end();f.flush();assert.equal(f.calls,2);f.propose();f.flush();assert.equal(f.calls,3);});
+
+test('retry count defaults to 3 and accepts configurable positive integers',()=>{for(const value of [undefined,null,'',0,-1,1.5,Infinity,'bad'])assert.equal(retryLimit(value),3);assert.equal(retryLimit('5'),5);assert.equal(retryLimit(1),1);});
+test('stop during a repeat prevents the next retry',()=>{const f=fixture();f.limit=3;f.propose();f.flush();f.retry.consider(f.retry.run,1,f.ctx.chat[1],99);f.retry.end();f.retry.cancel();f.flush();assert.equal(f.calls,1);});

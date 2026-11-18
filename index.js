@@ -1,3 +1,4 @@
+import { AutoRetry, retryLimit } from './auto-retry.js';
 import { itemizedPrompts } from '../../../itemized-prompts.js';
 import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js';
 
@@ -6,6 +7,20 @@ const SETTINGS_KEY = 'st_reply_stats';
 const DEFAULT_BODY_TAGS = 'content context';
 const IGNORED_TYPES = new Set(['impersonate', 'quiet', 'first_message']);
 const streamTimer = new StreamTimer();
+const autoRetry = new AutoRetry({
+    context,
+    enabled: () => settings().autoRetry,
+    limit: () => settings().retryLimit,
+    storage: globalThis.localStorage,
+    busy: () => {
+        const stop = document.querySelector('#mes_stop');
+        return !stop || getComputedStyle(stop).display !== 'none'
+            || !!document.querySelector('.mes_edit_textarea')
+            || !document.querySelector('#option_regenerate');
+    },
+    regenerate: () => document.querySelector('#option_regenerate').click(),
+    notify: (text, error) => globalThis.toastr?.[error ? 'warning' : 'info']?.(text),
+});
 
 function context() {
     return globalThis.SillyTavern?.getContext?.();
@@ -13,10 +28,12 @@ function context() {
 
 function settings() {
     const all = context()?.extensionSettings;
-    if (!all) return { bodyTags: DEFAULT_BODY_TAGS, showStats: true };
+    if (!all) return { bodyTags: DEFAULT_BODY_TAGS, showStats: true, autoRetry: false, retryLimit: 3 };
     const value = all[SETTINGS_KEY] ??= {};
     if (typeof value.bodyTags !== 'string') value.bodyTags = DEFAULT_BODY_TAGS;
     if (typeof value.showStats !== 'boolean') value.showStats = true;
+    if (typeof value.autoRetry !== 'boolean') value.autoRetry = false;
+    value.retryLimit = retryLimit(value.retryLimit);
     return value;
 }
 
@@ -106,6 +123,7 @@ function renderAll() {
 
 async function finalizeMessage(messageId, type) {
     const ctx = context();
+    const retryRun = autoRetry.run;
     const message = ctx?.chat?.[messageId];
     if (!isAssistantMessage(message) || IGNORED_TYPES.has(type)) return;
 
@@ -122,8 +140,10 @@ async function finalizeMessage(messageId, type) {
     const thinking = timing?.tagAt == null ? null : elapsedSeconds(message.gen_started, timing.tagAt);
     const stats = { v: 3, input, output, tps: computeRate(output, seconds), thinking, total: seconds, totalOutput };
 
+    if (context()?.chat !== ctx.chat || ctx.chat[messageId] !== message) return;
     store(message, stats);
     renderMessage(messageId);
+    autoRetry.consider(retryRun, messageId, message, stats.tps);
     Promise.resolve(ctx.saveChat?.()).catch(error => {
         console.warn('[Reply Token Stats] Could not persist message stats.', error);
     });
@@ -144,13 +164,36 @@ async function editBodyTags() {
             label: '正文显示统计',
             type: 'checkbox',
             defaultState: current.showStats,
+        }, {
+            id: 'reply-token-stats-auto-retry',
+            label: '超过 80 自动删除并重生（会额外消耗 API）',
+            type: 'checkbox', defaultState: current.autoRetry,
+        }, {
+            id: 'reply-token-stats-retry-limit',
+            label: '每轮最多自动重试次数（不含最初回复）',
+            type: 'number', min: 1, step: 1, defaultState: String(current.retryLimit),
+        }, {
+            id: 'reply-token-stats-restore',
+            label: '恢复上次自动删除的回复（替换当前末条；仅限未继续聊天时）',
+            type: 'checkbox', defaultState: false,
         }],
     });
     const value = await popup.show();
     if (typeof value !== 'string') return;
+    const limit = Number(popup.inputResults?.get('reply-token-stats-retry-limit'));
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+        globalThis.toastr?.warning?.('重试次数请填写大于或等于 1 的整数；本次设置未保存。');
+        return;
+    }
+    current.retryLimit = limit;
     current.bodyTags = formatBodyTags(value);
     current.showStats = popup.inputResults?.get('reply-token-stats-show') !== false;
+    current.autoRetry = popup.inputResults?.get('reply-token-stats-auto-retry') === true;
     ctx.saveSettingsDebounced?.();
+    if (popup.inputResults?.get('reply-token-stats-restore') === true) {
+        try { await autoRetry.restore(); }
+        catch (error) { globalThis.toastr?.warning?.(error.message); }
+    }
     renderAll();
 }
 
@@ -183,6 +226,7 @@ function init() {
 
     const { eventSource, eventTypes } = ctx;
     eventSource.on(eventTypes.GENERATION_STARTED, (type, _options, dryRun) => {
+        autoRetry.start(type, dryRun);
         if (dryRun || IGNORED_TYPES.has(type)) {
             streamTimer.cancel();
             return;
@@ -192,13 +236,15 @@ function init() {
     eventSource.on(eventTypes.STREAM_TOKEN_RECEIVED, text => {
         streamTimer.update(text, Date.now(), context()?.streamingProcessor?.messageId);
     });
-    eventSource.on(eventTypes.GENERATION_STOPPED, () => streamTimer.cancel());
+    eventSource.on(eventTypes.GENERATION_STOPPED, () => { streamTimer.cancel(); autoRetry.cancel(); });
+    eventSource.on(eventTypes.GENERATION_ENDED, () => autoRetry.end());
     eventSource.on(eventTypes.MESSAGE_RECEIVED, finalizeMessage);
     eventSource.on(eventTypes.CHARACTER_MESSAGE_RENDERED, renderMessage);
     eventSource.on(eventTypes.MESSAGE_SWIPED, renderMessage);
     eventSource.on(eventTypes.MESSAGE_UPDATED, renderMessage);
     eventSource.on(eventTypes.CHAT_CHANGED, () => {
         streamTimer.cancel();
+        autoRetry.cancel();
         deferRenderAll();
     });
     eventSource.on(eventTypes.CHAT_LOADED, deferRenderAll);
