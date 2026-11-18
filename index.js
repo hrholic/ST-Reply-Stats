@@ -1,3 +1,4 @@
+import * as Tavern from '../../../../script.js';
 import { AutoRetry, retryLimit } from './auto-retry.js';
 import { itemizedPrompts } from '../../../itemized-prompts.js';
 import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js';
@@ -12,13 +13,16 @@ const autoRetry = new AutoRetry({
     enabled: () => settings().autoRetry,
     limit: () => settings().retryLimit,
     storage: globalThis.localStorage,
-    busy: () => {
-        const stop = document.querySelector('#mes_stop');
-        return !stop || getComputedStyle(stop).display !== 'none'
-            || !!document.querySelector('.mes_edit_textarea')
-            || !document.querySelector('#option_regenerate');
+    busy: () => Boolean(
+        (typeof Tavern.isGenerating === 'function' ? Tavern.isGenerating() : Tavern.is_send_press)
+        || document.body?.dataset.generating === 'true'
+        || document.querySelector('#chat .edit_textarea, #chat .reasoning_edit_textarea')
+    ),
+    regenerate: () => {
+        const generate = context()?.generate ?? Tavern.Generate;
+        if (typeof generate !== 'function') throw new Error('酒馆原生重生接口不可用');
+        return generate('regenerate');
     },
-    regenerate: () => document.querySelector('#option_regenerate').click(),
     notify: (text, error) => globalThis.toastr?.[error ? 'warning' : 'info']?.(text),
 });
 

@@ -32,3 +32,16 @@ test('manual start resets retry budget',()=>{const f=fixture();f.limit=2;f.propo
 
 test('retry count defaults to 3 and accepts configurable positive integers',()=>{for(const value of [undefined,null,'',0,-1,1.5,Infinity,'bad'])assert.equal(retryLimit(value),3);assert.equal(retryLimit('5'),5);assert.equal(retryLimit(1),1);});
 test('stop during a repeat prevents the next retry',()=>{const f=fixture();f.limit=3;f.propose();f.flush();f.retry.consider(f.retry.run,1,f.ctx.chat[1],99);f.retry.end();f.retry.cancel();f.flush();assert.equal(f.calls,1);});
+test('native MESSAGE_RECEIVED then swipe metadata finalization must still regenerate',()=>{
+ const f=fixture();f.propose();
+ // SillyTavern saveReply/addOneMessage/updateSwipeCounter finalize this after MESSAGE_RECEIVED.
+ const m=f.ctx.chat[1];m.extra={...(m.extra||{}),token_count:1000};
+ m.swipe_info=[{extra:{}},{send_date:'now',extra:structuredClone(m.extra)}];
+ f.flush();assert.equal(f.calls,1);
+});
+test('waits for native busy state to clear after ended event',()=>{const f=fixture();f.propose();f.busy=true;f.flush();assert.equal(f.calls,0);f.busy=false;f.flush();assert.equal(f.calls,1);});
+test('stop while waiting for native cleanup cancels queued retry',()=>{const f=fixture();f.propose();f.busy=true;f.flush();f.retry.cancel();f.busy=false;f.flush();assert.equal(f.calls,0);});
+test('streaming order: generation ended before message received',()=>{const f=fixture();f.retry.start('normal',false);f.retry.end();f.retry.consider(f.retry.run,1,f.ctx.chat[1],90);f.flush();assert.equal(f.calls,1);});
+test('selected alternative changed: do not regenerate',()=>{const f=fixture();f.propose();f.ctx.chat[1].swipe_id=0;f.flush();assert.equal(f.calls,0);});
+test('new generation identity: do not regenerate',()=>{const f=fixture();f.propose();f.ctx.chat[1].gen_started='new';f.flush();assert.equal(f.calls,0);});
+test('native API rejection is handled without a retry storm',async()=>{const f=fixture();f.retry.regenerate=()=>Promise.reject(Error('offline'));f.propose();f.flush();await new Promise(r=>setTimeout(r,0));assert.equal(f.calls,0);assert.equal(f.data.size,1);assert.equal(f.tasks.length,0);});

@@ -11,10 +11,13 @@ test('actual index wiring: setting save, finish event, backed-up native regenera
  ctx.Popup=class {constructor(_a,_b,_c,options){assert.equal(options.customInputs.length,4);this.inputResults=new Map([['reply-token-stats-show',true],['reply-token-stats-auto-retry',true],['reply-token-stats-restore',restore],['reply-token-stats-retry-limit','3']]);}async show(){return 'content context';}};
  globalThis.localStorage={getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v)};
  globalThis.SillyTavern={getContext:()=>ctx};
- globalThis.getComputedStyle=()=>({display:'none'});
+ globalThis.getComputedStyle=()=>({display:'flex'}); // mobile theme must not determine generation state
+ globalThis.__tavern={isGenerating:()=>false};
+ ctx.generate=(type)=>{assert.equal(type,'regenerate');clicks++;handlers.get('GENERATION_STARTED')('regenerate',{},false);};
  globalThis.requestAnimationFrame=fn=>fn();
- globalThis.document={querySelector:q=>q==='#mes_stop'?{}:q==='#option_regenerate'?{click:()=>{clicks++;handlers.get('GENERATION_STARTED')('regenerate',{},false);}}:null};
+ globalThis.document={body:{dataset:{generating:'false'}},querySelector:()=>null}; // no menu/stop button required
  let source=fs.readFileSync(new URL('../index.js',import.meta.url),'utf8');
+ source=source.replace("import * as Tavern from '../../../../script.js';",'const Tavern = globalThis.__tavern;');
  source=source.replace("import { itemizedPrompts } from '../../../itemized-prompts.js';",'const itemizedPrompts = [];');
  for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js'`,JSON.stringify(new URL(`../${name}.js`,import.meta.url).href));
  source+='\nexport { editBodyTags };';
@@ -23,7 +26,7 @@ test('actual index wiring: setting save, finish event, backed-up native regenera
  handlers.get('GENERATION_STARTED')('normal',{},false);
  ctx.chat.push({is_user:true,mes:'hello'},{is_user:false,mes:'fast',extra:{token_count:1000},gen_started:1000,gen_finished:11000});
  await handlers.get('MESSAGE_RECEIVED')(1,'normal');
- assert.equal(clicks,0);handlers.get('GENERATION_ENDED')();
+ assert.equal(clicks,0);ctx.chat[1].swipe_id=0;ctx.chat[1].swipes=['fast'];ctx.chat[1].swipe_info=[{extra:structuredClone(ctx.chat[1].extra)}];handlers.get('GENERATION_ENDED')();
  await new Promise(r=>setTimeout(r,350));assert.equal(clicks,1);assert.equal(data.size,1);
  ctx.chat[1]={is_user:false,mes:'replacement'};restore=true;await mod.editBodyTags();
  assert.equal(ctx.chat[1].mes,'fast');assert.equal(renders,1);

@@ -1,6 +1,11 @@
 const TYPES = new Set(['normal', 'regenerate', 'swipe']);
 const assistant = m => m && !m.is_user && !m.is_system;
 const identity = ctx => JSON.stringify([ctx?.characterId, ctx?.chatId]);
+// Native rendering/save code mutates extra/swipe_info after MESSAGE_RECEIVED.
+// Only text, selected alternative and generation identity indicate a different reply.
+const replyIdentity = message => JSON.stringify([
+    message.mes, message.swipe_id ?? 0, message.gen_started ?? null,
+]);
 
 // A synchronous, read-back-verified local copy is required before any deletion.
 export function backupReply(storage, ctx, messageId) {
@@ -35,12 +40,12 @@ export class AutoRetry {
         const retries = this.automatic;
         this.automatic = 0;
         this.run = !dryRun && TYPES.has(type) && !ctx?.groupId && ctx?.chatId != null
-            ? { identity: identity(ctx), chat: ctx.chat, retries, ended: false, candidate: null, scheduled: false }
+            ? { identity: identity(ctx), chat: ctx.chat, retries, ended: false, candidate: null, scheduled: false, busyChecks: 0 }
             : null;
     }
     consider(run, messageId, message, rate) {
         if (!run || run !== this.run || run.retries >= retryLimit(this.limit()) || !Number.isFinite(rate) || rate <= 80) return;
-        run.candidate = { messageId, message, text: JSON.stringify(message) };
+        run.candidate = { messageId, message, text: replyIdentity(message) };
         this.queue(run);
     }
     end() {
@@ -56,15 +61,24 @@ export class AutoRetry {
     execute(run) {
         const ctx = this.context();
         const c = run.candidate;
-        if (run !== this.run || run.retries >= retryLimit(this.limit()) || !this.enabled() || this.busy() || ctx?.groupId
+        if (run !== this.run || run.retries >= retryLimit(this.limit()) || !this.enabled() || ctx?.groupId
             || identity(ctx) !== run.identity || ctx.chat !== run.chat
             || c.messageId !== ctx.chat.length - 1 || ctx.chat[c.messageId] !== c.message
-            || !assistant(c.message) || JSON.stringify(c.message) !== c.text) return;
+            || !assistant(c.message) || replyIdentity(c.message) !== c.text) return;
+        if (this.busy()) {
+            if (++run.busyChecks <= 40) this.schedule(() => this.execute(run), 250);
+            else this.notify('自动重生已跳过：酒馆仍在生成或编辑，请结束当前操作。', true);
+            return;
+        }
         try {
             backupReply(this.storage, ctx, c.messageId);
             this.run = null;
             this.automatic = run.retries + 1;
-            this.regenerate();
+            const result = this.regenerate();
+            Promise.resolve(result).catch(error => {
+                if (this.run?.chat === run.chat && this.run.retries === run.retries + 1) this.cancel();
+                this.notify(`自动重生失败，原回复已备份：${error.message}`, true);
+            });
             this.notify(`速率超过 80，已备份并重新生成（第 ${run.retries + 1}/${retryLimit(this.limit())} 次自动重试）。`);
         } catch (error) {
             this.cancel();
