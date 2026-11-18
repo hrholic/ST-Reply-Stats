@@ -169,7 +169,8 @@ async function editBodyTags() {
     const ctx = context();
     if (!ctx?.Popup || !ctx?.POPUP_TYPE) return;
     const current = settings();
-    const popup = new ctx.Popup('回复统计 v0.2.9 · 正文标签（空格分隔）', ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
+    const status = autoRetry.status.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    const popup = new ctx.Popup(`回复统计 v0.2.10 · 正文标签（空格分隔）<br><small>${status}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
         placeholder: DEFAULT_BODY_TAGS,
         customInputs: [{
             id: 'reply-token-stats-show',
@@ -253,10 +254,7 @@ function init() {
     };
     on(eventTypes.GENERATION_STARTED, (type, _options, dryRun) => {
         autoRetry.start(type, dryRun);
-        if (dryRun || IGNORED_TYPES.has(type)) {
-            streamTimer.cancel();
-            return;
-        }
+        if (dryRun || IGNORED_TYPES.has(type)) return;
         streamTimer.start({ type, chatId: context()?.chatId, tags: parseBodyTags(settings().bodyTags) });
     });
     on(eventTypes.STREAM_TOKEN_RECEIVED, text => {

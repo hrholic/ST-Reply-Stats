@@ -1,3 +1,4 @@
+const cloneMessage = value => JSON.parse(JSON.stringify(value));
 const TYPES = new Set(['normal', 'regenerate', 'swipe']);
 const assistant = m => m && !m.is_user && !m.is_system;
 const identity = ctx => JSON.stringify([ctx?.characterId, ctx?.chatId]);
@@ -12,7 +13,7 @@ export function backupReply(storage, ctx, messageId) {
     const key = `st_reply_stats_backups:${identity(ctx)}`;
     const entries = JSON.parse(storage.getItem(key) || '[]');
     const entry = {
-        messageId, message: structuredClone(ctx.chat[messageId]),
+        messageId, message: cloneMessage(ctx.chat[messageId]),
         previous: JSON.stringify(ctx.chat[messageId - 1] ?? null),
         at: Date.now(),
     };
@@ -33,18 +34,26 @@ export class AutoRetry {
         Object.assign(this, { context, enabled, limit, storage, busy, regenerate, notify, schedule });
         this.run = null;
         this.automatic = 0;
+        this.status = '等待新的回复';
     }
     cancel() { this.run = null; this.automatic = 0; }
     start(type, dryRun) {
+        if (dryRun || ['quiet', 'impersonate', 'first_message'].includes(type)) return;
+        type ??= 'normal';
         const ctx = this.context();
         const retries = this.automatic;
         this.automatic = 0;
         this.run = !dryRun && TYPES.has(type) && !ctx?.groupId && ctx?.chatId != null
             ? { identity: identity(ctx), chat: ctx.chat, retries, ended: false, candidate: null, scheduled: false, busyChecks: 0 }
             : null;
+        this.status = this.run ? '已记录本轮生成，等待回复完成' : '本轮类型或聊天不支持自动重生';
     }
     consider(run, messageId, message, rate) {
-        if (!run || run !== this.run || run.retries >= retryLimit(this.limit()) || !Number.isFinite(rate) || rate <= 80) return;
+        if (!run || run !== this.run) { this.status = '未匹配到本轮生成，已跳过'; return; }
+        if (!this.enabled()) { this.status = '自动重生开关已关闭'; return; }
+        if (run.retries >= retryLimit(this.limit())) { this.status = '已达到本轮重试次数上限'; return; }
+        if (!Number.isFinite(rate) || rate <= 80) { this.status = '本轮速率未超过 80 或无法计算'; return; }
+        this.status = `本轮速率 ${rate}，等待旧生成完全结束`;
         run.candidate = { messageId, message, text: replyIdentity(message) };
         this.queue(run);
     }
@@ -54,7 +63,8 @@ export class AutoRetry {
         this.queue(this.run);
     }
     queue(run) {
-        if (!run.ended || !run.candidate || run.scheduled) return;
+        // Some mobile themes hide #mes_stop, so core never emits GENERATION_ENDED.
+        if (!run.candidate || run.scheduled) return;
         run.scheduled = true;
         this.schedule(() => this.execute(run), 250);
     }
@@ -74,7 +84,7 @@ export class AutoRetry {
             || !assistant(c.message) || replyIdentity(c.message) !== c.text) return;
         if (this.busy()) {
             if (++run.busyChecks <= 40) this.schedule(() => this.execute(run), 250);
-            else this.notify('自动重生已跳过：酒馆仍在生成或编辑，请结束当前操作。', true);
+            else { this.status = '等待旧生成结束超时，未删除回复'; this.notify(this.status, true); }
             return;
         }
         try {
@@ -86,10 +96,12 @@ export class AutoRetry {
                 if (this.run?.chat === run.chat && this.run.retries === run.retries + 1) this.cancel();
                 this.notify(`自动重生失败，原回复已备份：${error.message}`, true);
             });
+            this.status = `已启动第 ${run.retries + 1}/${retryLimit(this.limit())} 次自动重试`;
             this.notify(`速率超过 80，已备份并重新生成（第 ${run.retries + 1}/${retryLimit(this.limit())} 次自动重试）。`);
         } catch (error) {
             this.cancel();
-            this.notify(`未自动删除：${error.message}`, true);
+            this.status = `未自动删除：${error.message}`;
+            this.notify(this.status, true);
         }
     }
     async restore() {
@@ -107,7 +119,7 @@ export class AutoRetry {
         }
         // Preserve the replacement as well, so restoring never loses a reply.
         if (ctx.chat[messageId]) backupReply(this.storage, ctx, messageId);
-        ctx.chat[messageId] = structuredClone(entry.message);
+        ctx.chat[messageId] = cloneMessage(entry.message);
         await ctx.printMessages();
         await ctx.saveChat();
     }

@@ -24,11 +24,13 @@ test('actual index wiring: setting save, finish event, backed-up native regenera
  const mod=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
  await mod.editBodyTags();assert.equal(ctx.extensionSettings.st_reply_stats.autoRetry,true);assert.equal(ctx.extensionSettings.st_reply_stats.retryLimit,3);
  handlers.get('GENERATION_STARTED')('normal',{},false);
+ handlers.get('GENERATION_STARTED')('quiet',{},false);
+ handlers.get('GENERATION_STARTED')('normal',{},true);
  ctx.chat.push({is_user:true,mes:'hello'},{is_user:false,mes:'fast',extra:{token_count:1000},gen_started:1000,gen_finished:11000});
  assert.equal(handlers.get('MESSAGE_RECEIVED')(1,'normal'),undefined);
  await new Promise(r=>setTimeout(r,10));
  ctx.streamingProcessor={isFinished:true}; // UI has stopped, but old Generate still owns this pointer
- assert.equal(clicks,0);ctx.chat[1].swipe_id=0;ctx.chat[1].swipes=['fast'];ctx.chat[1].swipe_info=[{extra:structuredClone(ctx.chat[1].extra)}];handlers.get('GENERATION_ENDED')();
+ assert.equal(clicks,0);ctx.chat[1].swipe_id=0;ctx.chat[1].swipes=['fast'];ctx.chat[1].swipe_info=[{extra:structuredClone(ctx.chat[1].extra)}];/* Theme hides native stop button: no GENERATION_ENDED emitted */
  await new Promise(r=>setTimeout(r,350));assert.equal(clicks,0);assert.equal(data.size,0);
  ctx.streamingProcessor=null; // old Generate finally finished cleanup
  await new Promise(r=>setTimeout(r,350));assert.equal(clicks,1);assert.equal(data.size,1);
