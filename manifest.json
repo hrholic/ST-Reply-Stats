@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Codex",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Compact token, speed, and observable pre-body timing beside assistant names.",
   "auto_update": false
 }

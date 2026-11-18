@@ -1,4 +1,3 @@
-import * as Tavern from '../../../../script.js';
 import { AutoRetry, retryLimit } from './auto-retry.js';
 import { itemizedPrompts } from '../../../itemized-prompts.js';
 import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js';
@@ -12,14 +11,18 @@ const autoRetry = new AutoRetry({
     context,
     enabled: () => settings().autoRetry,
     limit: () => settings().retryLimit,
-    storage: globalThis.localStorage,
+    storage: {
+        getItem: key => globalThis.localStorage.getItem(key),
+        setItem: (key, value) => globalThis.localStorage.setItem(key, value),
+    },
     busy: () => Boolean(
-        (typeof Tavern.isGenerating === 'function' ? Tavern.isGenerating() : Tavern.is_send_press)
+        context()?.streamingProcessor != null
         || document.body?.dataset.generating === 'true'
+        || document.body?.dataset.swiping === 'true'
         || document.querySelector('#chat .edit_textarea, #chat .reasoning_edit_textarea')
     ),
     regenerate: () => {
-        const generate = context()?.generate ?? Tavern.Generate;
+        const generate = context()?.generate;
         if (typeof generate !== 'function') throw new Error('酒馆原生重生接口不可用');
         return generate('regenerate');
     },
@@ -44,7 +47,10 @@ function settings() {
 async function tokenCount(text) {
     if (!text) return null;
     try {
-        const value = await context()?.getTokenCountAsync?.(text, 0);
+        const value = await Promise.race([
+            Promise.resolve(context()?.getTokenCountAsync?.(text, 0)),
+            new Promise(resolve => setTimeout(() => resolve(null), 3000)),
+        ]);
         return Number.isSafeInteger(value) && value >= 0 ? value : null;
     } catch (error) {
         console.warn('[Reply Token Stats] Token estimate failed.', error);
@@ -133,6 +139,7 @@ async function finalizeMessage(messageId, type) {
 
     const timing = streamTimer.take({ type, chatId: ctx.chatId, messageId });
 
+    const originalReply = JSON.stringify([message.mes, message.swipe_id ?? 0, message.gen_started]);
     const previousStats = message.extra?.[META_KEY];
     const nativeOutput = message.extra?.token_count;
     const totalOutput = Number.isSafeInteger(nativeOutput) && nativeOutput >= 0
@@ -144,7 +151,8 @@ async function finalizeMessage(messageId, type) {
     const thinking = timing?.tagAt == null ? null : elapsedSeconds(message.gen_started, timing.tagAt);
     const stats = { v: 3, input, output, tps: computeRate(output, seconds), thinking, total: seconds, totalOutput };
 
-    if (context()?.chat !== ctx.chat || ctx.chat[messageId] !== message) return;
+    if (context()?.chat !== ctx.chat || ctx.chat[messageId] !== message
+        || JSON.stringify([message.mes, message.swipe_id ?? 0, message.gen_started]) !== originalReply) return;
     store(message, stats);
     renderMessage(messageId);
     autoRetry.consider(retryRun, messageId, message, stats.tps);
@@ -161,7 +169,7 @@ async function editBodyTags() {
     const ctx = context();
     if (!ctx?.Popup || !ctx?.POPUP_TYPE) return;
     const current = settings();
-    const popup = new ctx.Popup('正文标签（空格分隔）', ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
+    const popup = new ctx.Popup('回复统计 v0.2.9 · 正文标签（空格分隔）', ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
         placeholder: DEFAULT_BODY_TAGS,
         customInputs: [{
             id: 'reply-token-stats-show',
@@ -229,7 +237,21 @@ function init() {
     }
 
     const { eventSource, eventTypes } = ctx;
-    eventSource.on(eventTypes.GENERATION_STARTED, (type, _options, dryRun) => {
+    // Core awaits event handlers. Stats must never become a dependency of generation.
+    const on = (event, handler) => {
+        if (!event) return;
+        eventSource.on(event, (...args) => {
+            try {
+                Promise.resolve(handler(...args)).catch(error => {
+                    console.warn('[Reply Token Stats] Listener failed; generation is unaffected.', error);
+                });
+            } catch (error) {
+                console.warn('[Reply Token Stats] Listener failed; generation is unaffected.', error);
+            }
+            // Intentionally return undefined, never the observer's Promise.
+        });
+    };
+    on(eventTypes.GENERATION_STARTED, (type, _options, dryRun) => {
         autoRetry.start(type, dryRun);
         if (dryRun || IGNORED_TYPES.has(type)) {
             streamTimer.cancel();
@@ -237,25 +259,26 @@ function init() {
         }
         streamTimer.start({ type, chatId: context()?.chatId, tags: parseBodyTags(settings().bodyTags) });
     });
-    eventSource.on(eventTypes.STREAM_TOKEN_RECEIVED, text => {
+    on(eventTypes.STREAM_TOKEN_RECEIVED, text => {
         streamTimer.update(text, Date.now(), context()?.streamingProcessor?.messageId);
     });
-    eventSource.on(eventTypes.GENERATION_STOPPED, () => { streamTimer.cancel(); autoRetry.cancel(); });
-    eventSource.on(eventTypes.GENERATION_ENDED, () => autoRetry.end());
-    eventSource.on(eventTypes.MESSAGE_RECEIVED, finalizeMessage);
-    eventSource.on(eventTypes.CHARACTER_MESSAGE_RENDERED, renderMessage);
-    eventSource.on(eventTypes.MESSAGE_SWIPED, renderMessage);
-    eventSource.on(eventTypes.MESSAGE_UPDATED, renderMessage);
-    eventSource.on(eventTypes.CHAT_CHANGED, () => {
+    on(eventTypes.GENERATION_STOPPED, () => { streamTimer.cancel(); autoRetry.cancel(); });
+    on(eventTypes.GENERATION_ENDED, () => autoRetry.end());
+    on(eventTypes.MESSAGE_RECEIVED, finalizeMessage);
+    on(eventTypes.CHARACTER_MESSAGE_RENDERED, renderMessage);
+    on(eventTypes.MESSAGE_SWIPED, renderMessage);
+    on(eventTypes.MESSAGE_UPDATED, renderMessage);
+    on(eventTypes.CHAT_CHANGED, () => {
         streamTimer.cancel();
         autoRetry.cancel();
         deferRenderAll();
     });
-    eventSource.on(eventTypes.CHAT_LOADED, deferRenderAll);
-    eventSource.on(eventTypes.MORE_MESSAGES_LOADED, deferRenderAll);
-    eventSource.on(eventTypes.APP_READY, initWandMenu);
+    on(eventTypes.CHAT_LOADED, deferRenderAll);
+    on(eventTypes.MORE_MESSAGES_LOADED, deferRenderAll);
+    on(eventTypes.APP_READY, initWandMenu);
     initWandMenu();
     renderAll();
 }
 
-init();
+try { init(); }
+catch (error) { console.warn('[Reply Token Stats] Initialization skipped.', error); }

@@ -59,6 +59,13 @@ export class AutoRetry {
         this.schedule(() => this.execute(run), 250);
     }
     execute(run) {
+        try { this.executeSafely(run); }
+        catch (error) {
+            this.cancel();
+            console.warn('[Reply Token Stats] Automatic retry cancelled safely.', error);
+        }
+    }
+    executeSafely(run) {
         const ctx = this.context();
         const c = run.candidate;
         if (run !== this.run || run.retries >= retryLimit(this.limit()) || !this.enabled() || ctx?.groupId
