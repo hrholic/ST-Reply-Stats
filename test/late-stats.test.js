@@ -17,13 +17,13 @@ for (const mode of ['normal','continue','edit','swipe','chat switch','chat id','
  eventTypes:{MESSAGE_RECEIVED:'received'},eventSource:{on:(k,f)=>handlers.set(k,f)}};
  globalThis.SillyTavern={getContext:()=>ctx};
  let source=await fs.readFile(new URL('../index.js',import.meta.url),'utf8');
- for(const name of ['auto-retry','stats'])source=source.replace(`'./${name}.js?v=0.2.16'`,JSON.stringify(new URL(`../${name}.js?v=0.2.16`,import.meta.url).href));
+ for(const name of ['auto-retry','stats'])source=source.replace(`'./${name}.js?v=0.2.17'`,JSON.stringify(new URL(`../${name}.js?v=0.2.17`,import.meta.url).href));
  source=source.replace("import('../../../itemized-prompts.js')",'Promise.resolve({itemizedPrompts:[{mesId:1,rawPrompt:"prompt"}]})');
  try{
  await import('data:text/javascript;base64,'+Buffer.from(source+'\n//late '+mode).toString('base64'));
  assert.equal(handlers.get('received')(1,mode==='continue'?'continue':'normal'),undefined);
  await new Promise(r=>realTimer(r,30));
- assert.match(document.querySelector('.reply-token-stats').textContent,/入—.*出—.*流—/);
+ assert.match(document.querySelector('.reply-token-stats').textContent,mode==='continue'?/入粗估.*出—.*流—/:/入粗估.*出粗估.*流粗估/);
  if(mode==='edit')message.mes='edited';
  if(mode==='swipe')message.swipe_id=1;
  if(mode==='chat switch')ctx.chat=[{mes:'new chat'}];

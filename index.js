@@ -1,5 +1,5 @@
-import { AutoRetry, retryLimit, outputThreshold, isCompletedReply, isActiveProcessor } from './auto-retry.js?v=0.2.16';
-import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js?v=0.2.16';
+import { AutoRetry, retryLimit, outputThreshold, isCompletedReply, isActiveProcessor } from './auto-retry.js?v=0.2.17';
+import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer, roughTokenCount, statisticsView, messageDisplayKey } from './stats.js?v=0.2.17';
 // Input itemization is optional. Older ST releases export it from script.js.
 let promptModule = null;
 let promptSourceStatus = '加载中';
@@ -19,6 +19,7 @@ const SETTINGS_KEY = 'st_reply_stats';
 const DEFAULT_BODY_TAGS = 'content context';
 const IGNORED_TYPES = new Set(['impersonate', 'quiet', 'first_message']);
 const streamTimer = new StreamTimer();
+let countStatus = '尚未计量';
 const autoRetry = new AutoRetry({
     context,
     enabled: () => settings().autoRetry,
@@ -111,7 +112,7 @@ function settings() {
 }
 
 async function tokenCount(text, onLate) {
-    if (!text) return null;
+    if (!text) { countStatus = '没有可分词文本'; return null; }
     try {
         let timedOut = false;
         let timer;
@@ -119,14 +120,16 @@ async function tokenCount(text, onLate) {
         // A slow tokenizer must not block generation, but its eventual result is useful.
         // Late results are display-only; never use them to start an automatic retry.
         count.then(value => {
-            if (timedOut && Number.isSafeInteger(value) && value >= 0) onLate?.(value);
+            if (timedOut && Number.isSafeInteger(value) && value >= 0) { countStatus = '迟到的分词结果已返回'; onLate?.(value); }
         }).catch(() => {});
         const value = await Promise.race([
             count,
-            new Promise(resolve => { timer = setTimeout(() => { timedOut = true; resolve(null); }, 3000); }),
+            new Promise(resolve => { timer = setTimeout(() => { timedOut = true; countStatus = '分词超过3秒，等待迟到结果'; resolve(null); }, 3000); }),
         ]).finally(() => clearTimeout(timer));
+        if (!timedOut) countStatus = Number.isSafeInteger(value) && value >= 0 ? '分词计数可用' : '分词未返回有效计数';
         return Number.isSafeInteger(value) && value >= 0 ? value : null;
     } catch (error) {
+        countStatus = '分词失败（未读取错误中的聊天内容）';
         console.warn('[Reply Token Stats] Token estimate failed.', error);
         return null;
     }
@@ -150,6 +153,14 @@ async function estimateInput(messageId, onLate) {
 
     // Chat framing varies by provider; a tiny overhead keeps this visibly an estimate.
     return estimate + overhead;
+}
+
+function roughInputCount(messageId) {
+    const prompt = promptModule?.itemizedPrompts?.find?.(item => Number(item?.mesId) === Number(messageId));
+    if (!prompt) return null;
+    const source = prompt.main_api === 'openai' ? prompt.rawPrompt : (prompt.finalPrompt ?? prompt.rawPrompt);
+    const count = roughTokenCount(typeof source === 'string' ? source : flattenPrompt(source));
+    return count === null ? null : count + (Array.isArray(prompt.rawPrompt) ? prompt.rawPrompt.length * 4 + 3 : 0);
 }
 
 function isAssistantMessage(message) {
@@ -189,11 +200,11 @@ function renderMessage(messageId) {
 
     const stats = message.extra?.[META_KEY] ?? null;
     const total = elapsedSeconds(message.gen_started, message.gen_finished);
-    const displayStats = (stats || total !== null) ? { ...stats, total: stats?.total ?? total } : null;
+    const displayStats = (stats || total !== null) ? statisticsView({ ...stats, total: stats?.total ?? total }, message) : null;
     const [beforeRate, rate, afterRate] = makeLabelParts(displayStats);
     const rateValue = document.createElement('span');
     rateValue.textContent = rate;
-    if (Number.isFinite(displayStats?.tps) && displayStats.tps > 80) {
+    if (displayStats?.rateSource !== 'rough' && Number.isFinite(displayStats?.tps) && displayStats.tps > 80) {
         rateValue.className = 'reply-token-stats-rate-high';
     }
     display.replaceChildren(beforeRate, rateValue, afterRate);
@@ -246,7 +257,7 @@ async function finalizeMessage(messageId, type) {
     const input = await estimateInput(messageId, value => applyLate({ input: value }));
     const seconds = elapsedSeconds(message.gen_started, message.gen_finished);
     const thinking = timing?.tagAt == null ? null : elapsedSeconds(message.gen_started, timing.tagAt);
-    const stats = { v: 3, input, output, tps: computeRate(output, seconds), thinking, total: seconds, totalOutput };
+    const stats = { v: 3, requestType: type ?? 'normal', displayKey: messageDisplayKey(message), roughInput: input === null ? roughInputCount(messageId) : null, input, output, tps: computeRate(output, seconds), thinking, total: seconds, totalOutput };
 
     if (context()?.chat !== ctx.chat || ctx.chat[messageId] !== message
         || JSON.stringify([message.mes, message.swipe_id ?? 0, message.gen_started]) !== originalReply) return;
@@ -270,7 +281,7 @@ async function editBodyTags() {
     if (!ctx?.Popup || !ctx?.POPUP_TYPE) return;
     const current = settings();
     const status = autoRetry.status.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-    const popup = new ctx.Popup(`回复统计 v0.2.16 · 正文标签（空格分隔）<br><small>${status}<br>统计显示：${current.showStats ? '开' : '关'}；输入统计来源：${promptSourceStatus}<br>${autoRetry.lastOutcome()}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
+    const popup = new ctx.Popup(`回复统计 v0.2.17 · 正文标签（空格分隔）<br><small>${status}<br>统计显示：${current.showStats ? '开' : '关'}；输入统计来源：${promptSourceStatus}<br>最近分词状态：${countStatus}<br>${autoRetry.lastOutcome()}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
         placeholder: DEFAULT_BODY_TAGS,
         customInputs: [{
             id: 'reply-token-stats-show',

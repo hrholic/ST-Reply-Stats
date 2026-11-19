@@ -43,13 +43,13 @@ function metric(label, value) {
 }
 
 export function makeLabelParts(stats) {
-    const input = metric('入', stats?.input);
-    const output = metric('出', stats?.output);
+    const input = metric(stats?.inputSource === 'rough' ? '入粗估' : '入', stats?.input);
+    const output = metric(stats?.outputSource === 'rough' ? '出粗估' : stats?.outputSource === 'native-late' ? '出原生' : '出', stats?.output);
     const rate = formatRate(stats?.tps);
     const thinking = `思${formatSeconds(stats?.thinking)}`;
     const total = `总${formatSeconds(stats?.total)}`;
     const prefix = [input.replace('≈', ''), output.replace('≈', '')].join(' · ');
-    return [`${stats ? '≈' : ''}${prefix} · 流`, rate, `t/s · ${thinking} · ${total}`];
+    return [`${stats ? '≈' : ''}${prefix} · ${stats?.rateSource === 'rough' ? '流粗估' : stats?.rateSource === 'native-late' ? '流原生' : '流'}`, rate, `t/s · ${thinking} · ${total}`];
 }
 
 export function makeLabel(stats) {
@@ -58,7 +58,7 @@ export function makeLabel(stats) {
 
 export function makeTitle(stats) {
     if (!stats) return '无可用记录（缺失信息不是 0）';
-    return '输入：SillyTavern 当前 itemization 本地估算\n'
+    return (stats.inputSource === 'rough' || stats.outputSource === 'rough' ? '粗估：UTF-8 字节数 ÷ 3.35；并非模型分词。仅供显示，不用于自动重生。\n' : '') + (stats.outputSource === 'native-late' ? '原生补计：使用当前回复原生 token_count，仅补显示，不追溯触发重生。\n' : '') + '输入：SillyTavern 当前 itemization 本地估算\n'
         + '输出：SillyTavern 原生 token_count，可能包含思考\n'
         + '流速：原生输出 token ÷ 从请求开始到完成的全部时间\n'
         + '思：与流速相同的生成起点到完整正文开始标签到达；— 表示未观察到标签或没有流式时间证据\n'
@@ -156,4 +156,44 @@ export class StreamTimer {
     cancel() {
         this.current = null;
     }
+}
+
+// Same deliberately coarse UTF-8 heuristic as stock ST 1.19 guesstimate.
+// Display fallback only: never pass this value to automatic retry decisions.
+export function roughTokenCount(text) {
+    return typeof text === 'string' && text.length
+        ? Math.ceil(new TextEncoder().encode(text).length / 3.35) : null;
+}
+
+export function statisticsView(stats, message) {
+    const view = { ...stats };
+    const sameReply = typeof stats?.displayKey === 'string' && stats.displayKey === messageDisplayKey(message);
+    const knownRequest = sameReply && ['normal', 'regenerate', 'swipe', '', null].includes(stats?.requestType);
+    const native = message?.extra?.token_count;
+    if (!Number.isFinite(view.output) && knownRequest
+        && Number.isSafeInteger(native) && native >= 0) {
+        view.output = native;
+        view.outputSource = 'native-late';
+    }
+    // A continuation's total text must not masquerade as its incremental output.
+    if (!Number.isFinite(view.output) && knownRequest) {
+        view.output = roughTokenCount(`${message?.extra?.reasoning ?? ''}${message?.mes ?? ''}`);
+        if (view.output !== null) view.outputSource = 'rough';
+    }
+    if (sameReply && !Number.isFinite(view.input) && Number.isSafeInteger(stats?.roughInput)) {
+        view.input = stats.roughInput;
+        view.inputSource = 'rough';
+    }
+    if (!Number.isFinite(view.tps) && ['rough', 'native-late'].includes(view.outputSource)) {
+        view.tps = computeRate(view.output, view.total);
+        if (view.tps !== null) view.rateSource = view.outputSource;
+    }
+    return view;
+}
+
+export function messageDisplayKey(message) {
+    const text = JSON.stringify([message?.mes, message?.extra?.reasoning, message?.swipe_id ?? 0, message?.gen_started, message?.gen_finished]);
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+    return `${text.length}:${hash >>> 0}`;
 }
