@@ -16,11 +16,11 @@ test('mixed cached old helper reproduces total plugin failure; versioned imports
  const source=await fs.readFile(new URL('../index.js',import.meta.url),'utf8');
  const prompt='Promise.resolve({itemizedPrompts:[{mesId:1,oaiTotalTokens:1234}]})';
  const wire=(versioned)=>source
-  .replace(/'\.\/auto-retry\.js(?:\?[^']*)?'/,JSON.stringify(helper+(versioned?'?v=0.2.14':'')))
-  .replace(/'\.\/stats\.js(?:\?[^']*)?'/,JSON.stringify(new URL('../stats.js?v=0.2.14',import.meta.url).href))
+  .replace(/'\.\/auto-retry\.js(?:\?[^']*)?'/,JSON.stringify(helper+(versioned?'?v=0.2.15':'')))
+  .replace(/'\.\/stats\.js(?:\?[^']*)?'/,JSON.stringify(new URL('../stats.js?v=0.2.15',import.meta.url).href))
   .replace("import('../../../itemized-prompts.js')",prompt);
  const load=s=>import('data:text/javascript;base64,'+Buffer.from(s).toString('base64'));
- await assert.rejects(load(wire(false)),/does not provide an export named 'isCompletedReply'/);
+ await assert.rejects(load(wire(false)),/does not provide an export named '(?:isCompletedReply|isActiveProcessor)'/);
  const dom=new JSDOM('<body><div id="extensionsMenu"></div><div class="mes" mesid="1"><span class="name_text">Assistant</span><span class="timer">10s</span></div></body>');
  globalThis.document=dom.window.document;
  globalThis.requestAnimationFrame=f=>f();
@@ -65,7 +65,7 @@ for(const mode of ['legacy fallback','both missing','optional import hangs'])tes
  eventTypes:{MESSAGE_RECEIVED:'MESSAGE_RECEIVED'},eventSource:{on:(k,f)=>handlers.set(k,f)}};
  globalThis.SillyTavern={getContext:()=>ctx};
  let source=await fs.readFile(new URL('../index.js',import.meta.url),'utf8');
- for(const name of ['auto-retry','stats'])source=source.replace(`'./${name}.js?v=0.2.14'`,JSON.stringify(new URL(`../${name}.js?v=0.2.14`,import.meta.url).href));
+ for(const name of ['auto-retry','stats'])source=source.replace(`'./${name}.js?v=0.2.15'`,JSON.stringify(new URL(`../${name}.js?v=0.2.15`,import.meta.url).href));
  source=source.replace("import('../../../itemized-prompts.js')",mode==='optional import hangs'?'new Promise(()=>{})':"Promise.reject(Error('404 itemized-prompts'))");
  source=source.replace("import('../../../../script.js')",mode==='legacy fallback'?'Promise.resolve({itemizedPrompts:[{mesId:1,oaiTotalTokens:222}]})':"Promise.reject(Error('optional unavailable'))");
  const warn=console.warn;console.warn=()=>{};

@@ -27,3 +27,13 @@
 .reply-token-stats .reply-token-stats-rate-high {
     color: #ff4d4f;
 }
+
+/* Separate status strip; never hides/replaces a chat message or send control. */
+.reply-token-stats-status {
+    font-size: 11px;
+    line-height: 1.35;
+    padding: 3px 6px;
+    color: var(--SmartThemeBodyColor, currentColor);
+    opacity: 0.85;
+    overflow-wrap: anywhere;
+}

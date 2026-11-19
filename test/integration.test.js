@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import {JSDOM} from 'jsdom';
 
 test('actual index wiring: setting save, finish event, backed-up native regenerate, restore',async()=>{
  const handlers=new Map(), data=new Map(); let clicks=0, renders=0;
  const ctx={characterId:1,chatId:'fixture',chat:[],extensionSettings:{},
  eventTypes:Object.fromEntries(['GENERATION_STARTED','GENERATION_STOPPED','GENERATION_ENDED','STREAM_TOKEN_RECEIVED','MESSAGE_RECEIVED','CHARACTER_MESSAGE_RENDERED','MESSAGE_SWIPED','MESSAGE_UPDATED','CHAT_CHANGED','CHAT_LOADED','MORE_MESSAGES_LOADED','APP_READY'].map(k=>[k,k])),
- eventSource:{on:(key,fn)=>handlers.set(key,fn)},saveChat:async()=>{},saveSettingsDebounced:()=>{},printMessages:async()=>{renders++;},POPUP_TYPE:{INPUT:1}};
+ eventSource:{on:(key,fn)=>handlers.set(key,fn)},saveChat:async()=>{},saveSettingsDebounced:()=>{},printMessages:async()=>{throw Error('must not reprint the whole chat');},POPUP_TYPE:{INPUT:1}};
  let restore=false, minSetting='3000';
  ctx.Popup=class {constructor(_a,_b,_c,options){assert.equal(options.customInputs.length,5);this.inputResults=new Map([['reply-token-stats-show',true],['reply-token-stats-auto-retry',true],['reply-token-stats-restore',restore],['reply-token-stats-retry-limit','3'],['reply-token-stats-min-output',minSetting]]);}async show(){return 'content context';}};
  globalThis.localStorage={getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v)};
@@ -16,12 +17,20 @@ test('actual index wiring: setting save, finish event, backed-up native regenera
  globalThis.__tavern={isGenerating:()=>false};
  ctx.generate=(type)=>{assert.equal(type,'regenerate');assert.match(notices.at(-1),/第 1 条回复已生成.*第 2 条回复/);clicks++;handlers.get('GENERATION_STARTED')('regenerate',{},false);};
  globalThis.requestAnimationFrame=fn=>fn();
- globalThis.document={body:{dataset:{generating:'false'}},querySelector:()=>null}; // no menu/stop button required
+ const dom=new JSDOM('<body><div id="chat"><div class="mes" mesid="0"><span class="name_text">User</span></div><div class="mes" mesid="1"><span class="name_text">Assistant</span></div></div></body>');
+ globalThis.document=dom.window.document;
+ document.body.dataset.generating='false';
+ ctx.addOneMessage=(message,{forceId})=>{
+  renders++;const row=document.createElement('div');row.className='mes';row.setAttribute('mesid',forceId);
+  const name=document.createElement('span');name.className='name_text';name.textContent='Assistant';
+  const text=document.createElement('div');text.className='mes_text';text.textContent=message.mes;
+  row.append(name,text);document.querySelector('#chat').append(row);
+ };
  let source=fs.readFileSync(new URL('../index.js',import.meta.url),'utf8');
  source=source.replace("import * as Tavern from '../../../../script.js';",'const Tavern = globalThis.__tavern;');
  source=source.replace("import('../../../itemized-prompts.js')",'Promise.resolve({itemizedPrompts:[]})');
- for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.14'`,JSON.stringify(new URL(`../${name}.js`,import.meta.url).href));
- source+='\nexport { editBodyTags };';
+ for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.15'`,JSON.stringify(new URL(`../${name}.js`,import.meta.url).href));
+ source+='\nexport { editBodyTags, autoRetry };';
  const mod=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
  await mod.editBodyTags();assert.equal(ctx.extensionSettings.st_reply_stats.autoRetry,true);assert.equal(ctx.extensionSettings.st_reply_stats.retryLimit,3);
  handlers.get('GENERATION_STARTED')('normal',{},false);
@@ -49,4 +58,16 @@ test('actual index wiring: setting save, finish event, backed-up native regenera
  assert.equal(ctx.extensionSettings.st_reply_stats.minOutput,1500);
  minSetting='0';await mod.editBodyTags();assert.equal(ctx.extensionSettings.st_reply_stats.minOutput,0);
  for(const invalid of ['', ' ', '-1', '1.5', 'bad']){minSetting=invalid;await mod.editBodyTags();assert.equal(ctx.extensionSettings.st_reply_stats.minOutput,0);}
+ ctx.streamingProcessor={isStopped:true,isFinished:false,abortController:{signal:{aborted:true}}};
+ handlers.get('GENERATION_STARTED')('normal',{},false);
+ ctx.chat[1]={is_user:false,mes:'new nonstream result',extra:{token_count:4000},gen_started:1000,gen_finished:101000};
+ handlers.get('MESSAGE_RECEIVED')(1,'normal');await new Promise(r=>setTimeout(r,10));
+ assert.doesNotMatch(mod.autoRetry.status,/未完整成功/);
+ assert.equal(ctx.chat[1].extra.reply_token_stats.output,4000);
+ // The stale terminal pointer must not block the manual restore control.
+ minSetting='0';restore=true;await mod.editBodyTags();
+ assert.notEqual(ctx.chat[1].mes,'new nonstream result');
+ assert.equal(document.querySelectorAll('#chat > .mes[mesid="0"]').length,1);
+ assert.equal(document.querySelectorAll('#chat > .mes[mesid="1"]').length,1);
+ dom.window.close();
 });

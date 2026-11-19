@@ -5,7 +5,7 @@ function fixture() {
     let ctx={characterId:1,chatId:'a',chat:[{is_user:true,mes:'hi'},{is_user:false,mes:'fast',swipes:['old','fast'],swipe_id:1}],printMessages:async()=>{},saveChat:async()=>{}};
     const data=new Map(), tasks=[]; let calls=0, busy=false, enabled=true, limit=1;
     const storage={getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v)};
-    const retry=new AutoRetry({context:()=>ctx,enabled:()=>enabled,limit:()=>limit,storage,busy:()=>busy,regenerate:()=>{calls++;retry.start('regenerate',false);},notify:()=>{},schedule:fn=>tasks.push(fn)});
+    const retry=new AutoRetry({renderReply:(ctx)=>ctx.printMessages?.(),context:()=>ctx,enabled:()=>enabled,limit:()=>limit,storage,busy:()=>busy,regenerate:()=>{calls++;retry.start('regenerate',false);},notify:()=>{},schedule:fn=>tasks.push(fn)});
     const propose=(rate=81)=>{retry.start('normal',false);retry.consider(retry.run,1,ctx.chat[1],rate);retry.end();};
     return {retry,storage,data,tasks,propose,get ctx(){return ctx;},set ctx(v){ctx=v;},get calls(){return calls;},set limit(v){limit=v;},set busy(v){busy=v;},set enabled(v){enabled=v;},flush:()=>tasks.splice(0).forEach(f=>f())};
 }
@@ -97,4 +97,20 @@ test('zero threshold disables only short-output reason, not speed',()=>{
 test('threshold change before scheduled deletion is honored',()=>{
  const f=fixture();f.retry.start('normal');f.retry.consider(f.retry.run,1,f.ctx.chat[1],20,2000);
  f.retry.minOutput=()=>0;f.flush();assert.equal(f.calls,0);assert.equal(f.data.size,0);
+});
+test('known request cap below minimum skips short retry but never suppresses fast retry',()=>{
+ const f=fixture();f.retry.start('normal');const data={type:'normal',max_tokens:1024};f.retry.observeRequest(data);
+ assert.deepEqual(data,{type:'normal',max_tokens:1024});
+ f.retry.consider(f.retry.run,1,f.ctx.chat[1],20,1000);f.flush();assert.equal(f.calls,0);assert.match(f.retry.status,/上限 1024/);
+ f.retry.consider(f.retry.run,1,f.ctx.chat[1],100,1000);f.flush();assert.equal(f.calls,1);
+});
+for(const [name,data,calls] of [
+ ['equal',{type:'normal',max_tokens:3000},1],
+ ['above',{type:'normal',max_tokens:4096},1],
+ ['unknown',{type:'normal'},1],
+ ['zero unknown',{type:'normal',max_tokens:0},1],
+ ['completion cap',{type:'normal',max_completion_tokens:1024},0],
+ ['quiet ignored',{type:'quiet',max_tokens:1024},1],
+])test('request cap '+name,()=>{
+ const f=fixture();f.retry.start('normal');f.retry.observeRequest(data);f.retry.consider(f.retry.run,1,f.ctx.chat[1],20,1000);f.flush();assert.equal(f.calls,calls);
 });

@@ -1,5 +1,5 @@
-import { AutoRetry, retryLimit, outputThreshold, isCompletedReply } from './auto-retry.js?v=0.2.14';
-import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js?v=0.2.14';
+import { AutoRetry, retryLimit, outputThreshold, isCompletedReply, isActiveProcessor } from './auto-retry.js?v=0.2.15';
+import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js?v=0.2.15';
 // Input itemization is optional. Older ST releases export it from script.js.
 let promptModule = null;
 let promptSourceStatus = '加载中';
@@ -29,7 +29,7 @@ const autoRetry = new AutoRetry({
         setItem: (key, value) => globalThis.localStorage.setItem(key, value),
     },
     busy: () => Boolean(
-        context()?.streamingProcessor != null
+        isActiveProcessor(context()?.streamingProcessor)
         || document.body?.dataset.generating === 'true'
         || document.body?.dataset.swiping === 'true'
         || document.querySelector('#chat .edit_textarea, #chat .reasoning_edit_textarea')
@@ -40,7 +40,43 @@ const autoRetry = new AutoRetry({
         return generate('regenerate');
     },
     notify: notifyStatus,
+    onStatus: renderStatus,
+    renderReply: renderRestoredReply,
 });
+
+function renderRestoredReply(ctx, messageId, message) {
+    if (context()?.chat !== ctx.chat || ctx.chat[messageId] !== message || messageId !== ctx.chat.length - 1) {
+        throw new Error('恢复目标已变化，未更新界面');
+    }
+    if (typeof ctx.addOneMessage !== 'function') throw new Error('酒馆单条回复渲染接口不可用');
+    const chat = document.querySelector('#chat');
+    if (!chat) throw new Error('聊天界面暂不可用，原回复仍有备份');
+    const oldRows = [...chat.querySelectorAll(`:scope > .mes[mesid="${messageId}"]`)];
+    // Render first. If native rendering throws, do not remove the old DOM.
+    ctx.addOneMessage(message, { forceId: messageId, scroll: false, showSwipes: true });
+    for (const row of oldRows) row.remove();
+    renderMessage(messageId);
+}
+
+function renderStatus(text) {
+    const form = document.querySelector('#send_form');
+    if (!form) return;
+    let status = document.querySelector('#reply-token-stats-status');
+    const meaningful = /第 \d+ 条|已恢复|重新生成|自动重生出错|已达到本轮重试|等待旧生成结束超时|未自动删除|本轮输出上限|上次自动重生|原回复已恢复/.test(text);
+    if (!meaningful) {
+        if (status) status.hidden = true;
+        return;
+    }
+    if (!status) {
+        status = document.createElement('div');
+        status.id = 'reply-token-stats-status';
+        status.className = 'reply-token-stats-status';
+        status.setAttribute('role', 'status');
+        form.insertAdjacentElement('beforebegin', status);
+    }
+    status.hidden = false;
+    status.textContent = `回复统计：${text}`;
+}
 
 function notifyStatus(text, error = false) {
     const toast = globalThis.toastr?.[error ? 'warning' : 'info'];
@@ -166,7 +202,10 @@ async function finalizeMessage(messageId, type) {
     const message = ctx?.chat?.[messageId];
     if (!isAssistantMessage(message) || IGNORED_TYPES.has(type)) return;
 
-    const completed = isCompletedReply(message, ctx.streamingProcessor);
+    // Old ST can retain an aborted processor into a later non-streaming turn.
+    const processor = ctx.streamingProcessor !== retryRun?.initialProcessor ? ctx.streamingProcessor : null;
+    const completed = isCompletedReply(message, processor);
+    autoRetry.observeCompletion(retryRun, messageId, message, completed, processor);
     const timing = streamTimer.take({ type, chatId: ctx.chatId, messageId });
 
     const originalReply = JSON.stringify([message.mes, message.swipe_id ?? 0, message.gen_started]);
@@ -201,7 +240,7 @@ async function editBodyTags() {
     if (!ctx?.Popup || !ctx?.POPUP_TYPE) return;
     const current = settings();
     const status = autoRetry.status.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-    const popup = new ctx.Popup(`回复统计 v0.2.14 · 正文标签（空格分隔）<br><small>${status}<br>统计显示：${current.showStats ? '开' : '关'}；输入统计来源：${promptSourceStatus}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
+    const popup = new ctx.Popup(`回复统计 v0.2.15 · 正文标签（空格分隔）<br><small>${status}<br>统计显示：${current.showStats ? '开' : '关'}；输入统计来源：${promptSourceStatus}<br>${autoRetry.lastOutcome()}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
         placeholder: DEFAULT_BODY_TAGS,
         customInputs: [{
             id: 'reply-token-stats-show',
@@ -299,10 +338,11 @@ function init() {
         if (dryRun || IGNORED_TYPES.has(type)) return;
         streamTimer.start({ type, chatId: context()?.chatId, tags: parseBodyTags(settings().bodyTags) });
     });
+    on(eventTypes.CHAT_COMPLETION_SETTINGS_READY, data => autoRetry.observeRequest(data));
     on(eventTypes.STREAM_TOKEN_RECEIVED, text => {
         streamTimer.update(text, Date.now(), context()?.streamingProcessor?.messageId);
     });
-    on(eventTypes.GENERATION_STOPPED, () => { streamTimer.cancel(); autoRetry.cancel(); });
+    on(eventTypes.GENERATION_STOPPED, () => { streamTimer.cancel(); autoRetry.stop(); });
     on(eventTypes.GENERATION_ENDED, () => autoRetry.end());
     on(eventTypes.MESSAGE_RECEIVED, finalizeMessage);
     on(eventTypes.CHARACTER_MESSAGE_RENDERED, renderMessage);
@@ -317,6 +357,7 @@ function init() {
     on(eventTypes.MORE_MESSAGES_LOADED, deferRenderAll);
     on(eventTypes.APP_READY, initWandMenu);
     initWandMenu();
+    renderStatus(autoRetry.lastOutcome());
     renderAll();
 }
 

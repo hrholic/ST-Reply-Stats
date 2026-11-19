@@ -1,0 +1,21 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import {JSDOM} from 'jsdom';
+test('persistent status shows retry outcomes but not normal/off tracking noise',async()=>{
+ const dom=new JSDOM('<body><form id="send_form"><textarea id="send_textarea"></textarea></form></body>');
+ globalThis.document=dom.window.document;globalThis.requestAnimationFrame=f=>f();
+ globalThis.SillyTavern={getContext:()=>({chat:[],extensionSettings:{st_reply_stats:{autoRetry:false}},eventTypes:{},eventSource:{on:()=>{}}})};
+ let source=await fs.readFile(new URL('../index.js',import.meta.url),'utf8');
+ source=source.replace("import('../../../itemized-prompts.js')",'Promise.resolve({itemizedPrompts:[]})');
+ for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.15'`,JSON.stringify(new URL(`../${name}.js?v=0.2.15`,import.meta.url).href));
+ source+='\nexport {renderStatus};';
+ const {renderStatus}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+ renderStatus('已记录本轮生成，等待回复完成');assert.equal(document.querySelector('#reply-token-stats-status'),null);
+ renderStatus('第 1 条回复已生成，但速率超过 80，正在生成第 2 条回复');
+ const status=document.querySelector('#reply-token-stats-status');assert.equal(status.hidden,false);assert.match(status.textContent,/第 2 条/);
+ assert.equal(document.querySelector('#send_form').previousElementSibling,status);
+ renderStatus('未匹配到本轮生成，已跳过');assert.equal(status.hidden,true);
+ renderStatus('上次自动重生未完整成功，备份已保留');assert.equal(status.hidden,false);
+ assert.ok(document.querySelector('#send_textarea'));dom.window.close();
+});
