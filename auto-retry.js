@@ -72,7 +72,7 @@ function retryReason(rate, output, threshold, maxOutput) {
 }
 
 export class AutoRetry {
-    constructor({ context, enabled, limit = () => 3, minOutput = () => 3000, storage, busy, regenerate, notify, onStatus, renderReply = () => {}, schedule = setTimeout }) {
+    constructor({ context, enabled, limit = () => 3, minOutput = () => 3000, storage, busy, regenerate, notify, onStatus, renderReply = () => {}, schedule = (callback, delay) => globalThis.setTimeout(callback, delay) }) {
         Object.assign(this, { context, enabled, limit, minOutput, storage, busy, regenerate, notify, onStatus, renderReply, schedule });
         this.run = null;
         this.automatic = 0;

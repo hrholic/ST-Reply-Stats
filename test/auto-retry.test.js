@@ -114,3 +114,17 @@ for(const [name,data,calls] of [
 ])test('request cap '+name,()=>{
  const f=fixture();f.retry.start('normal');f.retry.observeRequest(data);f.retry.consider(f.retry.run,1,f.ctx.chat[1],20,1000);f.flush();assert.equal(f.calls,calls);
 });
+
+test('default scheduler calls browser timer with Window/global receiver, never AutoRetry',()=>{
+ const original=globalThis.setTimeout,queued=[];
+ globalThis.setTimeout=function(callback,delay){assert.equal(this,globalThis);queued.push({callback,delay});return 1;};
+ try{
+  const ctx={chatId:'receiver-test',characterId:1,chat:[{is_user:true,mes:'hi'},{is_user:false,mes:'fast'}]};
+  const data=new Map();let calls=0;
+  const retry=new AutoRetry({context:()=>ctx,enabled:()=>true,limit:()=>1,minOutput:()=>0,
+   storage:{getItem:k=>data.get(k),setItem:(k,v)=>data.set(k,v)},busy:()=>false,notify:()=>{},regenerate:()=>{calls++;}});
+  retry.start('normal');retry.consider(retry.run,1,ctx.chat[1],100,4000);
+  assert.equal(queued.length,1);assert.equal(queued[0].delay,250);
+  queued[0].callback();assert.equal(calls,1);
+ }finally{globalThis.setTimeout=original;}
+});
