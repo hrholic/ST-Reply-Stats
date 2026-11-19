@@ -1,5 +1,5 @@
-import { AutoRetry, retryLimit, outputThreshold, isCompletedReply, isActiveProcessor } from './auto-retry.js?v=0.2.15';
-import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js?v=0.2.15';
+import { AutoRetry, retryLimit, outputThreshold, isCompletedReply, isActiveProcessor } from './auto-retry.js?v=0.2.16';
+import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js?v=0.2.16';
 // Input itemization is optional. Older ST releases export it from script.js.
 let promptModule = null;
 let promptSourceStatus = '加载中';
@@ -110,13 +110,21 @@ function settings() {
     return value;
 }
 
-async function tokenCount(text) {
+async function tokenCount(text, onLate) {
     if (!text) return null;
     try {
+        let timedOut = false;
+        let timer;
+        const count = Promise.resolve(context()?.getTokenCountAsync?.(text, 0));
+        // A slow tokenizer must not block generation, but its eventual result is useful.
+        // Late results are display-only; never use them to start an automatic retry.
+        count.then(value => {
+            if (timedOut && Number.isSafeInteger(value) && value >= 0) onLate?.(value);
+        }).catch(() => {});
         const value = await Promise.race([
-            Promise.resolve(context()?.getTokenCountAsync?.(text, 0)),
-            new Promise(resolve => setTimeout(() => resolve(null), 3000)),
-        ]);
+            count,
+            new Promise(resolve => { timer = setTimeout(() => { timedOut = true; resolve(null); }, 3000); }),
+        ]).finally(() => clearTimeout(timer));
         return Number.isSafeInteger(value) && value >= 0 ? value : null;
     } catch (error) {
         console.warn('[Reply Token Stats] Token estimate failed.', error);
@@ -124,7 +132,7 @@ async function tokenCount(text) {
     }
 }
 
-async function estimateInput(messageId) {
+async function estimateInput(messageId, onLate) {
     const itemizedPrompts = promptModule?.itemizedPrompts;
     const prompt = Array.isArray(itemizedPrompts)
         ? itemizedPrompts.find(item => Number(item?.mesId) === Number(messageId))
@@ -136,11 +144,12 @@ async function estimateInput(messageId) {
     }
 
     const source = prompt.main_api === 'openai' ? prompt.rawPrompt : (prompt.finalPrompt ?? prompt.rawPrompt);
-    const estimate = await tokenCount(typeof source === 'string' ? source : flattenPrompt(source));
+    const overhead = Array.isArray(prompt.rawPrompt) ? prompt.rawPrompt.length * 4 + 3 : 0;
+    const estimate = await tokenCount(typeof source === 'string' ? source : flattenPrompt(source), value => onLate?.(value + overhead));
     if (estimate === null) return null;
 
     // Chat framing varies by provider; a tiny overhead keeps this visibly an estimate.
-    return Array.isArray(prompt.rawPrompt) ? estimate + prompt.rawPrompt.length * 4 + 3 : estimate;
+    return estimate + overhead;
 }
 
 function isAssistantMessage(message) {
@@ -212,12 +221,29 @@ async function finalizeMessage(messageId, type) {
 
     const originalReply = JSON.stringify([message.mes, message.swipe_id ?? 0, message.gen_started]);
     const previousStats = message.extra?.[META_KEY];
+    const originalChatId = ctx.chatId;
+    const lateFingerprint = JSON.stringify([message.extra?.reasoning, message.gen_finished]);
+    let storedStats = null;
+    const pendingLate = {};
+    const stillSameReply = () => context()?.chat === ctx.chat && context()?.chatId === originalChatId
+        && ctx.chat[messageId] === message
+        && JSON.stringify([message.extra?.reasoning, message.gen_finished]) === lateFingerprint
+        && JSON.stringify([message.mes, message.swipe_id ?? 0, message.gen_started]) === originalReply;
+    const applyLate = patch => {
+        Object.assign(pendingLate, patch);
+        if (!storedStats || !stillSameReply() || message.extra?.[META_KEY] !== storedStats) return;
+        Object.assign(storedStats, pendingLate);
+        storedStats.tps = computeRate(storedStats.output, storedStats.total);
+        store(message, storedStats);
+        renderMessage(messageId);
+        Promise.resolve(ctx.saveChat?.()).catch(error => console.warn('[Reply Token Stats] Could not persist late statistics.', error));
+    };
     const nativeOutput = message.extra?.token_count;
     const totalOutput = Number.isSafeInteger(nativeOutput) && nativeOutput >= 0
         ? nativeOutput
-        : await tokenCount(`${message.extra?.reasoning ?? ''}${message.mes ?? ''}`);
+        : await tokenCount(`${message.extra?.reasoning ?? ''}${message.mes ?? ''}`, value => applyLate({ totalOutput: value, output: requestOutput(value, previousStats?.totalOutput, type) }));
     const output = requestOutput(totalOutput, previousStats?.totalOutput, type);
-    const input = await estimateInput(messageId);
+    const input = await estimateInput(messageId, value => applyLate({ input: value }));
     const seconds = elapsedSeconds(message.gen_started, message.gen_finished);
     const thinking = timing?.tagAt == null ? null : elapsedSeconds(message.gen_started, timing.tagAt);
     const stats = { v: 3, input, output, tps: computeRate(output, seconds), thinking, total: seconds, totalOutput };
@@ -228,6 +254,8 @@ async function finalizeMessage(messageId, type) {
     renderMessage(messageId);
     if (completed) autoRetry.consider(retryRun, messageId, message, stats.tps, stats.output);
     else autoRetry.status = '本轮未完整成功生成，不自动删除或重试';
+    storedStats = stats;
+    if (Object.keys(pendingLate).length) applyLate({});
     Promise.resolve(ctx.saveChat?.()).catch(error => {
         console.warn('[Reply Token Stats] Could not persist message stats.', error);
     });
@@ -242,7 +270,7 @@ async function editBodyTags() {
     if (!ctx?.Popup || !ctx?.POPUP_TYPE) return;
     const current = settings();
     const status = autoRetry.status.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-    const popup = new ctx.Popup(`回复统计 v0.2.15 · 正文标签（空格分隔）<br><small>${status}<br>统计显示：${current.showStats ? '开' : '关'}；输入统计来源：${promptSourceStatus}<br>${autoRetry.lastOutcome()}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
+    const popup = new ctx.Popup(`回复统计 v0.2.16 · 正文标签（空格分隔）<br><small>${status}<br>统计显示：${current.showStats ? '开' : '关'}；输入统计来源：${promptSourceStatus}<br>${autoRetry.lastOutcome()}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
         placeholder: DEFAULT_BODY_TAGS,
         customInputs: [{
             id: 'reply-token-stats-show',

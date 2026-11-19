@@ -8,7 +8,7 @@ test('persistent status shows retry outcomes but not normal/off tracking noise',
  globalThis.SillyTavern={getContext:()=>({chat:[],extensionSettings:{st_reply_stats:{autoRetry:false}},eventTypes:{},eventSource:{on:()=>{}}})};
  let source=await fs.readFile(new URL('../index.js',import.meta.url),'utf8');
  source=source.replace("import('../../../itemized-prompts.js')",'Promise.resolve({itemizedPrompts:[]})');
- for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.15'`,JSON.stringify(new URL(`../${name}.js?v=0.2.15`,import.meta.url).href));
+ for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.16'`,JSON.stringify(new URL(`../${name}.js?v=0.2.16`,import.meta.url).href));
  source+='\nexport {renderStatus};';
  const {renderStatus}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
  renderStatus('已记录本轮生成，等待回复完成');assert.equal(document.querySelector('#reply-token-stats-status'),null);

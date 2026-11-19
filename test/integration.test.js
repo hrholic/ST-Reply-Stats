@@ -29,7 +29,7 @@ test('actual index wiring: setting save, finish event, backed-up native regenera
  let source=fs.readFileSync(new URL('../index.js',import.meta.url),'utf8');
  source=source.replace("import * as Tavern from '../../../../script.js';",'const Tavern = globalThis.__tavern;');
  source=source.replace("import('../../../itemized-prompts.js')",'Promise.resolve({itemizedPrompts:[]})');
- for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.15'`,JSON.stringify(new URL(`../${name}.js`,import.meta.url).href));
+ for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.16'`,JSON.stringify(new URL(`../${name}.js`,import.meta.url).href));
  source+='\nexport { editBodyTags, autoRetry };';
  const mod=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
  await mod.editBodyTags();assert.equal(ctx.extensionSettings.st_reply_stats.autoRetry,true);assert.equal(ctx.extensionSettings.st_reply_stats.retryLimit,3);

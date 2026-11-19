@@ -15,7 +15,7 @@ test('normal sends remain independent of hanging tokenizer, storage and observer
  let source=fs.readFileSync(new URL('../index.js',import.meta.url),'utf8');
  assert.ok(!source.includes("from '../../../../script.js'"));
  source=source.replace("import('../../../itemized-prompts.js')",'Promise.resolve({itemizedPrompts:[]})');
- for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.15'`,JSON.stringify(new URL(`../${name}.js`,import.meta.url).href));
+ for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.16'`,JSON.stringify(new URL(`../${name}.js`,import.meta.url).href));
  await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
  const emit=async(k,...args)=>{await handlers.get(k)?.(...args);};
  async function normal(){await emit('GENERATION_STARTED','normal',{},false);generated++;ctx.chat.push({is_user:false,mes:'result'+generated,gen_started:1000,gen_finished:11000,extra:{}});await emit('MESSAGE_RECEIVED',ctx.chat.length-1,'normal');await emit('GENERATION_ENDED');return 'completed';}
