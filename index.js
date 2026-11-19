@@ -42,6 +42,8 @@ const autoRetry = new AutoRetry({
     notify: notifyStatus,
     onStatus: renderStatus,
     renderReply: renderRestoredReply,
+    stopGeneration: () => context()?.stopGeneration?.() ?? false,
+    canStop: () => !document.querySelector('#chat .edit_textarea, #chat .reasoning_edit_textarea'),
 });
 
 function renderRestoredReply(ctx, messageId, message) {
@@ -62,7 +64,7 @@ function renderStatus(text) {
     const form = document.querySelector('#send_form');
     if (!form) return;
     let status = document.querySelector('#reply-token-stats-status');
-    const meaningful = /第 \d+ 条|已恢复|重新生成|自动重生出错|已达到本轮重试|等待旧生成结束超时|未自动删除|本轮输出上限|上次自动重生|原回复已恢复/.test(text);
+    const meaningful = /第 \d+ 条|已恢复|重新生成|自动重生出错|自动重生等待较久|无进展|已达到本轮重试|等待旧生成结束超时|未自动删除|本轮输出上限|上次自动重生|原回复已恢复/.test(text);
     if (!meaningful) {
         if (status) status.hidden = true;
         return;
@@ -340,6 +342,7 @@ function init() {
     });
     on(eventTypes.CHAT_COMPLETION_SETTINGS_READY, data => autoRetry.observeRequest(data));
     on(eventTypes.STREAM_TOKEN_RECEIVED, text => {
+        autoRetry.progress(context()?.streamingProcessor);
         streamTimer.update(text, Date.now(), context()?.streamingProcessor?.messageId);
     });
     on(eventTypes.GENERATION_STOPPED, () => { streamTimer.cancel(); autoRetry.stop(); });
@@ -347,7 +350,7 @@ function init() {
     on(eventTypes.MESSAGE_RECEIVED, finalizeMessage);
     on(eventTypes.CHARACTER_MESSAGE_RENDERED, renderMessage);
     on(eventTypes.MESSAGE_SWIPED, renderMessage);
-    on(eventTypes.MESSAGE_UPDATED, renderMessage);
+    on(eventTypes.MESSAGE_UPDATED, messageId => { autoRetry.edited(messageId); renderMessage(messageId); });
     on(eventTypes.CHAT_CHANGED, () => {
         streamTimer.cancel();
         autoRetry.cancel();

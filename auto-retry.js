@@ -72,8 +72,8 @@ function retryReason(rate, output, threshold, maxOutput) {
 }
 
 export class AutoRetry {
-    constructor({ context, enabled, limit = () => 3, minOutput = () => 3000, storage, busy, regenerate, notify, onStatus, renderReply = () => {}, schedule = (callback, delay) => globalThis.setTimeout(callback, delay) }) {
-        Object.assign(this, { context, enabled, limit, minOutput, storage, busy, regenerate, notify, onStatus, renderReply, schedule });
+    constructor({ context, enabled, limit = () => 3, minOutput = () => 3000, storage, busy, regenerate, notify, onStatus, renderReply = () => {}, stopGeneration = () => false, canStop = () => true, inactivityMs = 90000, watchdogSchedule = (callback, delay) => globalThis.setTimeout(callback, delay), watchdogCancel = handle => globalThis.clearTimeout(handle), schedule = (callback, delay) => globalThis.setTimeout(callback, delay) }) {
+        Object.assign(this, { context, enabled, limit, minOutput, storage, busy, regenerate, notify, onStatus, renderReply, stopGeneration, canStop, inactivityMs, watchdogSchedule, watchdogCancel, schedule });
         this.run = null;
         this.automatic = 0;
         this.status = '等待新的回复';
@@ -85,7 +85,7 @@ export class AutoRetry {
         this._status = value;
         try { this.onStatus?.(value); } catch (error) { console.warn('[Reply Token Stats] Status display failed.', error); }
     }
-    cancel() { this.revision++; this.run = null; this.automatic = 0; }
+    cancel() { this.clearWatchdog(this.activeAttempt); this.revision++; this.run = null; this.automatic = 0; }
     stop() {
         const attempt = this.activeAttempt;
         const ctx = this.context();
@@ -97,18 +97,88 @@ export class AutoRetry {
         this.cancel();
     }
     start(type, dryRun) {
-        if (dryRun || ['quiet', 'impersonate', 'first_message'].includes(type)) return;
+        if (dryRun || ['quiet', 'impersonate', 'first_message'].includes(type)) {
+            if (!dryRun && this.activeAttempt) {
+                this.activeAttempt.watchdogUnsafe = true; // Another request may now own native cancellation.
+                this.clearWatchdog(this.activeAttempt);
+            }
+            return;
+        }
         type ??= 'normal';
         this.revision++;
         const ctx = this.context();
-        const retries = this.automatic;
-        if (this.activeAttempt && !retries) this.activeAttempt.superseded = true;
+        const retries = type === 'regenerate' ? this.automatic : 0;
+        if (this.activeAttempt && !retries) {
+            this.activeAttempt.superseded = true;
+            this.clearWatchdog(this.activeAttempt);
+        }
         this.automatic = 0;
         this.run = !dryRun && TYPES.has(type) && !ctx?.groupId && ctx?.chatId != null
             ? { identity: identity(ctx), chat: ctx.chat, retries, initialProcessor: ctx.streamingProcessor, ended: false, candidate: null, scheduled: false, busyChecks: 0 }
             : null;
-        if (this.activeAttempt && retries) this.activeAttempt.run = this.run;
+        if (this.activeAttempt && retries) {
+            this.activeAttempt.run = this.run;
+            this.armWatchdog(this.activeAttempt); // Native Generate may await before emitting STARTED.
+        }
         this.status = this.run ? (retries ? `正在等待第 ${retries + 1} 条回复（第 ${retries}/${retryLimit(this.limit())} 次重试，原因：${this.activeAttempt?.reason ?? '已满足重试条件'}；原回复已有备份）` : '已记录本轮生成，等待回复完成') : '本轮类型或聊天不支持自动重生';
+    }
+    clearWatchdog(attempt) {
+        if (attempt?.watchdog != null) {
+            this.watchdogCancel(attempt.watchdog);
+            attempt.watchdog = null;
+        }
+    }
+    ownsAttempt(attempt) {
+        const ctx = this.context();
+        const id = attempt?.backup.messageId;
+        return Boolean(attempt && attempt === this.activeAttempt && !attempt.superseded && !attempt.watchdogUnsafe
+            && attempt.run && this.run === attempt.run && ctx?.chat === attempt.ctx.chat && identity(ctx) === attempt.identity
+            && [id, id + 1].includes(ctx.chat.length)
+            && JSON.stringify(ctx.chat[id - 1] ?? null) === attempt.backup.previous);
+    }
+    armWatchdog(attempt) {
+        this.clearWatchdog(attempt);
+        if (attempt.timedOut || !this.ownsAttempt(attempt)) return;
+        attempt.watchdog = this.watchdogSchedule(() => this.onInactivity(attempt), this.inactivityMs);
+        attempt.watchdog?.unref?.(); // Node-only test convenience; browser handles are numeric.
+    }
+    progress(processor) {
+        const attempt = this.activeAttempt;
+        if (!this.ownsAttempt(attempt) || !processor || processor === attempt.run.initialProcessor
+            || processor.messageId !== attempt.backup.messageId) return;
+        this.armWatchdog(attempt); // Includes reasoning-only stream events.
+    }
+    edited(messageId) {
+        if (this.activeAttempt?.backup.messageId !== Number(messageId)) return;
+        this.activeAttempt.superseded = true;
+        this.cancel();
+    }
+    onInactivity(attempt) {
+        attempt.watchdog = null;
+        if (!this.ownsAttempt(attempt) || !this.canStop()) return;
+        const processor = this.context()?.streamingProcessor;
+        const ownedStream = processor && processor !== attempt.run.initialProcessor
+            && processor.type === 'regenerate' && processor.messageId === attempt.backup.messageId
+            && isActiveProcessor(processor) && processor.isFinished !== true;
+        if (!ownedStream) {
+            this.saveOutcome(attempt, 'waiting');
+            this.status = '自动重生等待较久，无法安全确认请求归属；未自动停止，可手动点停止，原回复仍有备份';
+            this.notify(this.status, true);
+            return;
+        }
+        attempt.timedOut = true;
+        this.saveOutcome(attempt, 'timed_out');
+        const message = this.context().chat[attempt.backup.messageId];
+        if (message && assistant(message)) attempt.observed = { message, text: replyIdentity(message), complete: false };
+        try {
+            const stopped = this.stopGeneration();
+            this.status = stopped
+                ? `第 ${attempt.number} 条自动重生 ${Math.round(this.inactivityMs / 1000)} 秒无新内容，已请求停止；等待原生结束后恢复，原回复仍有备份`
+                : '自动重生无进展，原生停止未生效；未覆盖仍在生成的内容，原回复仍有备份';
+        } catch (error) {
+            this.status = `自动重生无进展，停止失败：${error.message}；未覆盖仍在生成的内容，原回复仍有备份`;
+        }
+        this.notify(this.status, true);
     }
     observeCompletion(run, messageId, message, complete, processor) {
         const attempt = this.activeAttempt;
@@ -171,7 +241,7 @@ export class AutoRetry {
         }
         try {
             const backup = backupReply(this.storage, ctx, c.messageId, 'original');
-            const attempt = { ctx, identity: identity(ctx), backup, original: c.message, reason: c.reason, superseded: false };
+            const attempt = { ctx, identity: identity(ctx), backup, original: c.message, reason: c.reason, number: run.retries + 2, superseded: false };
             this.run = null;
             this.automatic = run.retries + 1;
             this.activeAttempt = attempt;
@@ -183,12 +253,14 @@ export class AutoRetry {
             try { result = this.regenerate(); }
             catch (error) { this.finishAttempt(attempt, error).catch(e => this.reportFailure(e)); return; }
             if (result && typeof result.then === 'function') {
+                this.armWatchdog(attempt);
                 Promise.resolve(result).then(
                     () => this.finishAttempt(attempt),
                     error => this.finishAttempt(attempt, error),
                 ).catch(error => this.reportFailure(error));
             } else {
                 // Compatibility with event-only generation adapters.
+                this.clearWatchdog(attempt);
                 this.activeAttempt = null;
             }
         } catch (error) {
@@ -211,6 +283,7 @@ export class AutoRetry {
     }
     async finishAttempt(attempt, error) {
         if (this.activeAttempt !== attempt) return;
+        this.clearWatchdog(attempt);
         this.activeAttempt = null;
         const ctx = this.context();
         if (attempt.superseded || ctx?.chat !== attempt.ctx.chat || identity(ctx) !== attempt.identity) {
@@ -227,12 +300,12 @@ export class AutoRetry {
         const empty = !tail || !String(tail.mes ?? '').trim() || String(tail.mes ?? '').trim() === '...';
         const observed = attempt.observed;
         const matchesObservation = Boolean(observed && tail && observed.message === tail && observed.text === replyIdentity(tail));
-        if (!error && !unchanged && !empty && matchesObservation && observed.complete
+        if (!error && !attempt.timedOut && !unchanged && !empty && matchesObservation && observed.complete
             && !observed.processor?.isStopped && !observed.processor?.abortController?.signal?.aborted) {
             this.saveOutcome(attempt, 'completed');
             return;
         }
-        this.saveOutcome(attempt, attempt.stopped ? 'stopped' : 'failed');
+        this.saveOutcome(attempt, attempt.timedOut ? 'timed_out' : attempt.stopped ? 'stopped' : 'failed');
         this.cancel(); // An unsuccessful attempt must never start another retry.
         if (unchanged) {
             this.status = '重新生成未成功启动，原回复已保留，已停止自动重试';
@@ -253,7 +326,7 @@ export class AutoRetry {
             }
             await ctx.saveChat?.();
             if (!stillOwned()) return;
-            this.status = '重新生成未完整成功，已恢复原回复（未完成片段也已备份），已停止自动重试';
+            this.status = `${attempt.timedOut ? '自动重生无进展超时' : '重新生成未完整成功'}，已恢复原回复（未完成片段也已备份），已停止自动重试`;
         } else {
             this.status = '重新生成没有有效完成记录，已保留现有内容；原回复可从备份恢复，已停止自动重试';
         }
@@ -267,6 +340,8 @@ export class AutoRetry {
             const outcome = entries.slice().reverse().find(entry => entry.autoRetryOutcome)?.autoRetryOutcome;
             return {
                 pending: '上次自动重生未记录完成，原回复仍有备份',
+                timed_out: '上次自动重生无进展超时，原回复仍有备份；请核对恢复结果',
+                waiting: '上次自动重生等待较久，未自动停止；原回复仍有备份',
                 completed: '上次自动重生已确认完整完成',
                 failed: '上次自动重生未完整成功，备份已保留',
                 stopped: '上次自动重生已停止，原回复与片段备份均保留',
