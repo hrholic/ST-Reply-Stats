@@ -24,6 +24,16 @@ export function backupReply(storage, ctx, messageId) {
     return entry;
 }
 
+export function isCompletedReply(message, processor) {
+    const start = new Date(message?.gen_started).getTime();
+    const end = new Date(message?.gen_finished).getTime();
+    return Boolean(assistant(message) && typeof message.mes === 'string'
+        && message.mes.trim() && message.mes.trim() !== '...'
+        && Number.isFinite(start) && Number.isFinite(end) && end > start
+        && (!processor || (processor.isFinished === true && !processor.isStopped
+            && !processor.abortController?.signal?.aborted && !processor.toolCalls?.length)));
+}
+
 export function retryLimit(value) {
     const number = Number(value);
     return Number.isSafeInteger(number) && number >= 1 ? number : 3;
@@ -35,6 +45,7 @@ export class AutoRetry {
         this.run = null;
         this.automatic = 0;
         this.status = '等待新的回复';
+        this.activeAttempt = null;
     }
     cancel() { this.run = null; this.automatic = 0; }
     start(type, dryRun) {
@@ -42,6 +53,7 @@ export class AutoRetry {
         type ??= 'normal';
         const ctx = this.context();
         const retries = this.automatic;
+        if (this.activeAttempt && !retries) this.activeAttempt.superseded = true;
         this.automatic = 0;
         this.run = !dryRun && TYPES.has(type) && !ctx?.groupId && ctx?.chatId != null
             ? { identity: identity(ctx), chat: ctx.chat, retries, ended: false, candidate: null, scheduled: false, busyChecks: 0 }
@@ -82,28 +94,69 @@ export class AutoRetry {
             || identity(ctx) !== run.identity || ctx.chat !== run.chat
             || c.messageId !== ctx.chat.length - 1 || ctx.chat[c.messageId] !== c.message
             || !assistant(c.message) || replyIdentity(c.message) !== c.text) return;
-        if (this.busy()) {
+        if (this.busy() || this.activeAttempt) {
             if (++run.busyChecks <= 40) this.schedule(() => this.execute(run), 250);
             else { this.status = '等待旧生成结束超时，未删除回复'; this.notify(this.status, true); }
             return;
         }
         try {
-            backupReply(this.storage, ctx, c.messageId);
+            const backup = backupReply(this.storage, ctx, c.messageId);
+            const attempt = { ctx, identity: identity(ctx), backup, original: c.message, superseded: false };
             this.run = null;
             this.automatic = run.retries + 1;
-            const result = this.regenerate();
-            Promise.resolve(result).catch(error => {
-                if (this.run?.chat === run.chat && this.run.retries === run.retries + 1) this.cancel();
-                this.notify(`自动重生失败，原回复已备份：${error.message}`, true);
-            });
-            this.status = `已启动第 ${run.retries + 1}/${retryLimit(this.limit())} 次自动重试`;
-            this.notify(`速率超过 80，已备份并重新生成（第 ${run.retries + 1}/${retryLimit(this.limit())} 次自动重试）。`);
+            this.activeAttempt = attempt;
+            this.status = `第 ${run.retries + 1} 条回复已生成，但速率超过 80，正在生成第 ${run.retries + 2} 条回复`;
+            // Must be visible before native Generate deletes the old reply.
+            this.notify(this.status);
+            let result;
+            try { result = this.regenerate(); }
+            catch (error) { this.finishAttempt(attempt, error).catch(e => this.reportFailure(e)); return; }
+            if (result && typeof result.then === 'function') {
+                Promise.resolve(result).then(
+                    () => this.finishAttempt(attempt),
+                    error => this.finishAttempt(attempt, error),
+                ).catch(error => this.reportFailure(error));
+            } else {
+                // Compatibility with event-only generation adapters.
+                this.activeAttempt = null;
+            }
         } catch (error) {
             this.cancel();
+            this.activeAttempt = null;
             this.status = `未自动删除：${error.message}`;
             this.notify(this.status, true);
         }
     }
+    reportFailure(error) {
+        this.status = `自动重生出错，原回复仍有备份：${error.message}`;
+        this.notify(this.status, true);
+    }
+    async finishAttempt(attempt, error) {
+        if (this.activeAttempt !== attempt) return;
+        this.activeAttempt = null;
+        const ctx = this.context();
+        if (attempt.superseded || ctx?.chat !== attempt.ctx.chat || identity(ctx) !== attempt.identity) return;
+        const id = attempt.backup.messageId;
+        const tail = ctx.chat[id];
+        if (ctx.chat.length > id + 1 || (tail && !assistant(tail))) return;
+        const unchanged = tail === attempt.original;
+        const empty = !tail || !String(tail.mes ?? '').trim() || String(tail.mes ?? '').trim() === '...';
+        if (!error && !unchanged && !empty) return;
+        this.cancel(); // An unsuccessful attempt must never start another retry.
+        if (unchanged) {
+            this.status = '重新生成未成功启动，原回复已保留，已停止自动重试';
+        } else if (empty && JSON.stringify(ctx.chat[id - 1] ?? null) === attempt.backup.previous) {
+            if (tail) backupReply(this.storage, ctx, id);
+            ctx.chat[id] = cloneMessage(attempt.backup.message);
+            await ctx.printMessages?.();
+            await ctx.saveChat?.();
+            this.status = '重新生成失败或返回空内容，已恢复原回复，已停止自动重试';
+        } else {
+            this.status = '重新生成失败，已保留现有内容；原回复可从备份恢复，已停止自动重试';
+        }
+        this.notify(this.status, true);
+    }
+
     async restore() {
         this.cancel();
         const ctx = this.context();

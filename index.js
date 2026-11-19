@@ -1,4 +1,4 @@
-import { AutoRetry, retryLimit } from './auto-retry.js';
+import { AutoRetry, retryLimit, isCompletedReply } from './auto-retry.js';
 import { itemizedPrompts } from '../../../itemized-prompts.js';
 import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js';
 
@@ -26,8 +26,22 @@ const autoRetry = new AutoRetry({
         if (typeof generate !== 'function') throw new Error('酒馆原生重生接口不可用');
         return generate('regenerate');
     },
-    notify: (text, error) => globalThis.toastr?.[error ? 'warning' : 'info']?.(text),
+    notify: notifyStatus,
 });
+
+function notifyStatus(text, error = false) {
+    const toast = globalThis.toastr?.[error ? 'warning' : 'info'];
+    if (typeof toast === 'function') { toast(text, '回复速率', { timeOut: 8000 }); return; }
+    // Non-blocking fallback when a mobile theme/plugin does not expose toastr.
+    const note = document.createElement('div');
+    note.setAttribute('role', 'status');
+    note.textContent = text;
+    Object.assign(note.style, { position: 'fixed', bottom: '24px', left: '5%', width: '90%',
+        zIndex: '2147483647', padding: '12px', background: '#252525', color: '#fff',
+        borderRadius: '8px', pointerEvents: 'none' });
+    document.body.append(note);
+    setTimeout(() => note.remove(), 8000);
+}
 
 function context() {
     return globalThis.SillyTavern?.getContext?.();
@@ -137,6 +151,7 @@ async function finalizeMessage(messageId, type) {
     const message = ctx?.chat?.[messageId];
     if (!isAssistantMessage(message) || IGNORED_TYPES.has(type)) return;
 
+    const completed = isCompletedReply(message, ctx.streamingProcessor);
     const timing = streamTimer.take({ type, chatId: ctx.chatId, messageId });
 
     const originalReply = JSON.stringify([message.mes, message.swipe_id ?? 0, message.gen_started]);
@@ -155,7 +170,8 @@ async function finalizeMessage(messageId, type) {
         || JSON.stringify([message.mes, message.swipe_id ?? 0, message.gen_started]) !== originalReply) return;
     store(message, stats);
     renderMessage(messageId);
-    autoRetry.consider(retryRun, messageId, message, stats.tps);
+    if (completed) autoRetry.consider(retryRun, messageId, message, stats.tps);
+    else autoRetry.status = '本轮未完整成功生成，不按超速删除或重试';
     Promise.resolve(ctx.saveChat?.()).catch(error => {
         console.warn('[Reply Token Stats] Could not persist message stats.', error);
     });
@@ -170,7 +186,7 @@ async function editBodyTags() {
     if (!ctx?.Popup || !ctx?.POPUP_TYPE) return;
     const current = settings();
     const status = autoRetry.status.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-    const popup = new ctx.Popup(`回复统计 v0.2.10 · 正文标签（空格分隔）<br><small>${status}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
+    const popup = new ctx.Popup(`回复统计 v0.2.11 · 正文标签（空格分隔）<br><small>${status}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
         placeholder: DEFAULT_BODY_TAGS,
         customInputs: [{
             id: 'reply-token-stats-show',

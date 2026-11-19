@@ -11,9 +11,10 @@ test('actual index wiring: setting save, finish event, backed-up native regenera
  ctx.Popup=class {constructor(_a,_b,_c,options){assert.equal(options.customInputs.length,4);this.inputResults=new Map([['reply-token-stats-show',true],['reply-token-stats-auto-retry',true],['reply-token-stats-restore',restore],['reply-token-stats-retry-limit','3']]);}async show(){return 'content context';}};
  globalThis.localStorage={getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v)};
  globalThis.SillyTavern={getContext:()=>ctx};
+ const notices=[];globalThis.toastr={info:text=>notices.push(text),warning:text=>notices.push(text)};
  globalThis.getComputedStyle=()=>({display:'flex'}); // mobile theme must not determine generation state
  globalThis.__tavern={isGenerating:()=>false};
- ctx.generate=(type)=>{assert.equal(type,'regenerate');clicks++;handlers.get('GENERATION_STARTED')('regenerate',{},false);};
+ ctx.generate=(type)=>{assert.equal(type,'regenerate');assert.match(notices.at(-1),/第 1 条回复已生成.*第 2 条回复/);clicks++;handlers.get('GENERATION_STARTED')('regenerate',{},false);};
  globalThis.requestAnimationFrame=fn=>fn();
  globalThis.document={body:{dataset:{generating:'false'}},querySelector:()=>null}; // no menu/stop button required
  let source=fs.readFileSync(new URL('../index.js',import.meta.url),'utf8');
