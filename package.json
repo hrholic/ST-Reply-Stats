@@ -1,9 +1,12 @@
 {
   "name": "st-reply-stats",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "^31.0.1"
   }
 }
