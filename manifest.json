@@ -3,10 +3,10 @@
   "loading_order": 90,
   "requires": [],
   "optional": [],
-  "js": "index.js?v=0.2.13",
+  "js": "index.js?v=0.2.14",
   "css": "style.css",
   "author": "Codex",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "description": "Compact token, speed, and observable pre-body timing beside assistant names.",
   "auto_update": false
 }

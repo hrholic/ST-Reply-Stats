@@ -1,6 +1,18 @@
-import { AutoRetry, retryLimit, outputThreshold, isCompletedReply } from './auto-retry.js?v=0.2.13';
-import { itemizedPrompts } from '../../../itemized-prompts.js';
-import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js?v=0.2.13';
+import { AutoRetry, retryLimit, outputThreshold, isCompletedReply } from './auto-retry.js?v=0.2.14';
+import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js?v=0.2.14';
+// Input itemization is optional. Older ST releases export it from script.js.
+let promptModule = null;
+let promptSourceStatus = '加载中';
+import('../../../itemized-prompts.js')
+    .catch(() => import('../../../../script.js'))
+    .then(module => {
+        promptModule = module; // Keep the namespace: old ST replaces this live export on chat change.
+        promptSourceStatus = Array.isArray(module.itemizedPrompts) ? '可用' : '不可用（输入显示 —）';
+    })
+    .catch(error => {
+        promptSourceStatus = '不可用（输入显示 —）';
+        console.warn('[Reply Token Stats] Optional input statistics unavailable; output/speed remain active.', error);
+    });
 
 const META_KEY = 'reply_token_stats';
 const SETTINGS_KEY = 'st_reply_stats';
@@ -75,6 +87,7 @@ async function tokenCount(text) {
 }
 
 async function estimateInput(messageId) {
+    const itemizedPrompts = promptModule?.itemizedPrompts;
     const prompt = Array.isArray(itemizedPrompts)
         ? itemizedPrompts.find(item => Number(item?.mesId) === Number(messageId))
         : null;
@@ -188,7 +201,7 @@ async function editBodyTags() {
     if (!ctx?.Popup || !ctx?.POPUP_TYPE) return;
     const current = settings();
     const status = autoRetry.status.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-    const popup = new ctx.Popup(`回复统计 v0.2.13 · 正文标签（空格分隔）<br><small>${status}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
+    const popup = new ctx.Popup(`回复统计 v0.2.14 · 正文标签（空格分隔）<br><small>${status}<br>统计显示：${current.showStats ? '开' : '关'}；输入统计来源：${promptSourceStatus}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
         placeholder: DEFAULT_BODY_TAGS,
         customInputs: [{
             id: 'reply-token-stats-show',
