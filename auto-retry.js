@@ -34,14 +34,27 @@ export function isCompletedReply(message, processor) {
             && !processor.abortController?.signal?.aborted && !processor.toolCalls?.length)));
 }
 
+export function outputThreshold(value) {
+    if (!['number', 'string'].includes(typeof value) || (typeof value === 'string' && !value.trim())) return 3000;
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number >= 0 ? number : 3000;
+}
+
 export function retryLimit(value) {
     const number = Number(value);
     return Number.isSafeInteger(number) && number >= 1 ? number : 3;
 }
 
+function retryReason(rate, output, threshold) {
+    const reasons = [];
+    if (Number.isFinite(rate) && rate > 80) reasons.push('速率超过 80');
+    if (threshold > 0 && Number.isSafeInteger(output) && output >= 0 && output < threshold) reasons.push(`输出 token 少于 ${threshold}`);
+    return reasons.join('，且');
+}
+
 export class AutoRetry {
-    constructor({ context, enabled, limit = () => 3, storage, busy, regenerate, notify, schedule = setTimeout }) {
-        Object.assign(this, { context, enabled, limit, storage, busy, regenerate, notify, schedule });
+    constructor({ context, enabled, limit = () => 3, minOutput = () => 3000, storage, busy, regenerate, notify, schedule = setTimeout }) {
+        Object.assign(this, { context, enabled, limit, minOutput, storage, busy, regenerate, notify, schedule });
         this.run = null;
         this.automatic = 0;
         this.status = '等待新的回复';
@@ -60,13 +73,14 @@ export class AutoRetry {
             : null;
         this.status = this.run ? '已记录本轮生成，等待回复完成' : '本轮类型或聊天不支持自动重生';
     }
-    consider(run, messageId, message, rate) {
+    consider(run, messageId, message, rate, output) {
         if (!run || run !== this.run) { this.status = '未匹配到本轮生成，已跳过'; return; }
         if (!this.enabled()) { this.status = '自动重生开关已关闭'; return; }
         if (run.retries >= retryLimit(this.limit())) { this.status = '已达到本轮重试次数上限'; return; }
-        if (!Number.isFinite(rate) || rate <= 80) { this.status = '本轮速率未超过 80 或无法计算'; return; }
-        this.status = `本轮速率 ${rate}，等待旧生成完全结束`;
-        run.candidate = { messageId, message, text: replyIdentity(message) };
+        const reason = retryReason(rate, output, outputThreshold(this.minOutput()));
+        if (!reason) { this.status = '本轮未满足重生条件，或统计无法计算'; return; }
+        this.status = `本轮${reason}，等待旧生成完全结束`;
+        run.candidate = { messageId, message, text: replyIdentity(message), reason, rate, output };
         this.queue(run);
     }
     end() {
@@ -94,6 +108,8 @@ export class AutoRetry {
             || identity(ctx) !== run.identity || ctx.chat !== run.chat
             || c.messageId !== ctx.chat.length - 1 || ctx.chat[c.messageId] !== c.message
             || !assistant(c.message) || replyIdentity(c.message) !== c.text) return;
+        c.reason = retryReason(c.rate, c.output, outputThreshold(this.minOutput()));
+        if (!c.reason) return;
         if (this.busy() || this.activeAttempt) {
             if (++run.busyChecks <= 40) this.schedule(() => this.execute(run), 250);
             else { this.status = '等待旧生成结束超时，未删除回复'; this.notify(this.status, true); }
@@ -105,7 +121,7 @@ export class AutoRetry {
             this.run = null;
             this.automatic = run.retries + 1;
             this.activeAttempt = attempt;
-            this.status = `第 ${run.retries + 1} 条回复已生成，但速率超过 80，正在生成第 ${run.retries + 2} 条回复`;
+            this.status = `第 ${run.retries + 1} 条回复已生成，但${c.reason}，正在生成第 ${run.retries + 2} 条回复`;
             // Must be visible before native Generate deletes the old reply.
             this.notify(this.status);
             let result;

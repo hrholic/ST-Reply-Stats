@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AutoRetry, retryLimit } from '../auto-retry.js';
+import { AutoRetry, retryLimit, outputThreshold } from '../auto-retry.js';
 function fixture() {
     let ctx={characterId:1,chatId:'a',chat:[{is_user:true,mes:'hi'},{is_user:false,mes:'fast',swipes:['old','fast'],swipe_id:1}],printMessages:async()=>{},saveChat:async()=>{}};
     const data=new Map(), tasks=[]; let calls=0, busy=false, enabled=true, limit=1;
@@ -49,3 +49,52 @@ test('hidden native stop button: completion without GENERATION_ENDED still retri
 test('quiet and dry-run events do not destroy main generation tracking',()=>{const f=fixture();f.retry.start('normal',false);const main=f.retry.run;f.retry.start('quiet',false);f.retry.start('normal',true);assert.equal(f.retry.run,main);f.retry.consider(main,1,f.ctx.chat[1],99);f.flush();assert.equal(f.calls,1);});
 test('legacy undefined generation type is normal',()=>{const f=fixture();f.retry.start(undefined,false);f.retry.consider(f.retry.run,1,f.ctx.chat[1],99);f.flush();assert.equal(f.calls,1);});
 test('HTTP mobile environment without structuredClone still backs up and restores',async()=>{const f=fixture();const clone=globalThis.structuredClone;globalThis.structuredClone=undefined;try{f.propose();f.flush();assert.equal(f.calls,1);f.ctx.chat[1]={is_user:false,mes:'replacement'};await f.retry.restore();assert.equal(f.ctx.chat[1].mes,'fast');}finally{globalThis.structuredClone=clone;}});
+
+for(const [name,rate,output,expected] of [
+ ['2999 tokens with normal speed',20,2999,1],
+ ['exactly 3000',20,3000,0],
+ ['3001',20,3001,0],
+ ['short output with unknown speed',null,2999,1],
+ ['short output with NaN speed',NaN,2999,1],
+ ['zero explicitly measured tokens',null,0,1],
+ ['unknown output',20,undefined,0],
+ ['null output',20,null,0],
+ ['NaN output',20,NaN,0],
+ ['negative output',20,-1,0],
+ ['fractional output',20,2.5,0],
+ ['string output',20,'2000',0],
+ ['both conditions',100,2999,1],
+ ['fast with unknown output',100,null,1],
+])test('OR threshold: '+name,()=>{
+ const f=fixture();f.retry.start('normal');f.retry.consider(f.retry.run,1,f.ctx.chat[1],rate,output);f.flush();assert.equal(f.calls,expected);
+});
+test('both triggers produce one retry and combined numbered notice',()=>{
+ const f=fixture(),notices=[];f.retry.notify=s=>notices.push(s);
+ f.retry.start('normal');const run=f.retry.run;
+ f.retry.consider(run,1,f.ctx.chat[1],100,2000);f.retry.consider(run,1,f.ctx.chat[1],100,2000);f.flush();
+ assert.equal(f.calls,1);assert.match(notices[0],/第 1 条.*速率超过 80，且输出 token 少于 3000.*第 2 条/);
+});
+test('short output respects disabled switch and shared retry cap',()=>{
+ const f=fixture();f.enabled=false;f.retry.start('normal');f.retry.consider(f.retry.run,1,f.ctx.chat[1],null,2000);f.flush();assert.equal(f.calls,0);
+ f.enabled=true;f.limit=3;f.retry.consider(f.retry.run,1,f.ctx.chat[1],null,2000);f.flush();
+ for(let i=0;i<4;i++){f.ctx.chat[1]={is_user:false,mes:'retry'+i};f.retry.consider(f.retry.run,1,f.ctx.chat[1],null,2000);f.flush();}
+ assert.equal(f.calls,3);assert.equal(JSON.parse([...f.data.values()][0]).length,3);
+});
+test('output threshold defaults, validation, and zero disabling',()=>{
+ for(const n of [undefined,null,'',-1,1.5,NaN,Infinity,'bad'])assert.equal(outputThreshold(n),3000);
+ assert.equal(outputThreshold('1500'),1500);assert.equal(outputThreshold(0),0);
+});
+test('custom threshold is used in comparison and notice; equality does not trigger',()=>{
+ const f=fixture(),notices=[];f.retry.minOutput=()=>1500;f.retry.notify=s=>notices.push(s);
+ f.retry.start('normal');f.retry.consider(f.retry.run,1,f.ctx.chat[1],20,1500);f.flush();assert.equal(f.calls,0);
+ f.retry.consider(f.retry.run,1,f.ctx.chat[1],20,1499);f.flush();assert.equal(f.calls,1);assert.match(notices[0],/少于 1500/);
+});
+test('zero threshold disables only short-output reason, not speed',()=>{
+ const f=fixture();f.retry.minOutput=()=>0;f.retry.start('normal');
+ f.retry.consider(f.retry.run,1,f.ctx.chat[1],20,10);f.flush();assert.equal(f.calls,0);
+ f.retry.consider(f.retry.run,1,f.ctx.chat[1],90,10);f.flush();assert.equal(f.calls,1);
+});
+test('threshold change before scheduled deletion is honored',()=>{
+ const f=fixture();f.retry.start('normal');f.retry.consider(f.retry.run,1,f.ctx.chat[1],20,2000);
+ f.retry.minOutput=()=>0;f.flush();assert.equal(f.calls,0);assert.equal(f.data.size,0);
+});

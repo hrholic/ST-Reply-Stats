@@ -16,8 +16,8 @@ test('mixed cached old helper reproduces total plugin failure; versioned imports
  const source=await fs.readFile(new URL('../index.js',import.meta.url),'utf8');
  const prompt='const itemizedPrompts=[{mesId:1,oaiTotalTokens:1234}];';
  const wire=(versioned)=>source
-  .replace(/'\.\/auto-retry\.js(?:\?[^']*)?'/,JSON.stringify(helper+(versioned?'?v=0.2.12':'')))
-  .replace(/'\.\/stats\.js(?:\?[^']*)?'/,JSON.stringify(new URL('../stats.js?v=0.2.12',import.meta.url).href))
+  .replace(/'\.\/auto-retry\.js(?:\?[^']*)?'/,JSON.stringify(helper+(versioned?'?v=0.2.13':'')))
+  .replace(/'\.\/stats\.js(?:\?[^']*)?'/,JSON.stringify(new URL('../stats.js?v=0.2.13',import.meta.url).href))
   .replace("import { itemizedPrompts } from '../../../itemized-prompts.js';",prompt);
  const load=s=>import('data:text/javascript;base64,'+Buffer.from(s).toString('base64'));
  await assert.rejects(load(wire(false)),/does not provide an export named 'isCompletedReply'/);

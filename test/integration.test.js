@@ -7,8 +7,8 @@ test('actual index wiring: setting save, finish event, backed-up native regenera
  const ctx={characterId:1,chatId:'fixture',chat:[],extensionSettings:{},
  eventTypes:Object.fromEntries(['GENERATION_STARTED','GENERATION_STOPPED','GENERATION_ENDED','STREAM_TOKEN_RECEIVED','MESSAGE_RECEIVED','CHARACTER_MESSAGE_RENDERED','MESSAGE_SWIPED','MESSAGE_UPDATED','CHAT_CHANGED','CHAT_LOADED','MORE_MESSAGES_LOADED','APP_READY'].map(k=>[k,k])),
  eventSource:{on:(key,fn)=>handlers.set(key,fn)},saveChat:async()=>{},saveSettingsDebounced:()=>{},printMessages:async()=>{renders++;},POPUP_TYPE:{INPUT:1}};
- let restore=false;
- ctx.Popup=class {constructor(_a,_b,_c,options){assert.equal(options.customInputs.length,4);this.inputResults=new Map([['reply-token-stats-show',true],['reply-token-stats-auto-retry',true],['reply-token-stats-restore',restore],['reply-token-stats-retry-limit','3']]);}async show(){return 'content context';}};
+ let restore=false, minSetting='3000';
+ ctx.Popup=class {constructor(_a,_b,_c,options){assert.equal(options.customInputs.length,5);this.inputResults=new Map([['reply-token-stats-show',true],['reply-token-stats-auto-retry',true],['reply-token-stats-restore',restore],['reply-token-stats-retry-limit','3'],['reply-token-stats-min-output',minSetting]]);}async show(){return 'content context';}};
  globalThis.localStorage={getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v)};
  globalThis.SillyTavern={getContext:()=>ctx};
  const notices=[];globalThis.toastr={info:text=>notices.push(text),warning:text=>notices.push(text)};
@@ -20,7 +20,7 @@ test('actual index wiring: setting save, finish event, backed-up native regenera
  let source=fs.readFileSync(new URL('../index.js',import.meta.url),'utf8');
  source=source.replace("import * as Tavern from '../../../../script.js';",'const Tavern = globalThis.__tavern;');
  source=source.replace("import { itemizedPrompts } from '../../../itemized-prompts.js';",'const itemizedPrompts = [];');
- for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.12'`,JSON.stringify(new URL(`../${name}.js`,import.meta.url).href));
+ for(const name of ['stats','auto-retry'])source=source.replace(`'./${name}.js?v=0.2.13'`,JSON.stringify(new URL(`../${name}.js`,import.meta.url).href));
  source+='\nexport { editBodyTags };';
  const mod=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
  await mod.editBodyTags();assert.equal(ctx.extensionSettings.st_reply_stats.autoRetry,true);assert.equal(ctx.extensionSettings.st_reply_stats.retryLimit,3);
@@ -37,4 +37,16 @@ test('actual index wiring: setting save, finish event, backed-up native regenera
  await new Promise(r=>setTimeout(r,350));assert.equal(clicks,1);assert.equal(data.size,1);
  ctx.chat[1]={is_user:false,mes:'replacement'};restore=true;await mod.editBodyTags();
  assert.equal(ctx.chat[1].mes,'fast');assert.equal(renders,1);
+ // Actual index forwards output tokens even when speed is below the old threshold.
+ ctx.chat[1]={is_user:false,mes:'short but slow',extra:{token_count:1000},gen_started:1000,gen_finished:101000};
+ handlers.get('GENERATION_STARTED')('normal',{},false);
+ handlers.get('MESSAGE_RECEIVED')(1,'normal');
+ await new Promise(r=>setTimeout(r,350));
+ assert.equal(clicks,2);assert.match(notices.at(-1),/输出 token 少于 3000/);
+ assert.doesNotMatch(notices.at(-1),/速率超过 80/);
+ assert.equal(ctx.extensionSettings.st_reply_stats.minOutput,3000);
+ restore=false;minSetting='1500';await mod.editBodyTags();
+ assert.equal(ctx.extensionSettings.st_reply_stats.minOutput,1500);
+ minSetting='0';await mod.editBodyTags();assert.equal(ctx.extensionSettings.st_reply_stats.minOutput,0);
+ for(const invalid of ['', ' ', '-1', '1.5', 'bad']){minSetting=invalid;await mod.editBodyTags();assert.equal(ctx.extensionSettings.st_reply_stats.minOutput,0);}
 });

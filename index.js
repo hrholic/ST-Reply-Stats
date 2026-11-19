@@ -1,6 +1,6 @@
-import { AutoRetry, retryLimit, isCompletedReply } from './auto-retry.js?v=0.2.12';
+import { AutoRetry, retryLimit, outputThreshold, isCompletedReply } from './auto-retry.js?v=0.2.13';
 import { itemizedPrompts } from '../../../itemized-prompts.js';
-import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js?v=0.2.12';
+import { computeRate, elapsedSeconds, flattenPrompt, formatBodyTags, makeLabelParts, makeTitle, parseBodyTags, requestOutput, StreamTimer } from './stats.js?v=0.2.13';
 
 const META_KEY = 'reply_token_stats';
 const SETTINGS_KEY = 'st_reply_stats';
@@ -11,6 +11,7 @@ const autoRetry = new AutoRetry({
     context,
     enabled: () => settings().autoRetry,
     limit: () => settings().retryLimit,
+    minOutput: () => settings().minOutput,
     storage: {
         getItem: key => globalThis.localStorage.getItem(key),
         setItem: (key, value) => globalThis.localStorage.setItem(key, value),
@@ -49,12 +50,13 @@ function context() {
 
 function settings() {
     const all = context()?.extensionSettings;
-    if (!all) return { bodyTags: DEFAULT_BODY_TAGS, showStats: true, autoRetry: false, retryLimit: 3 };
+    if (!all) return { bodyTags: DEFAULT_BODY_TAGS, showStats: true, autoRetry: false, retryLimit: 3, minOutput: 3000 };
     const value = all[SETTINGS_KEY] ??= {};
     if (typeof value.bodyTags !== 'string') value.bodyTags = DEFAULT_BODY_TAGS;
     if (typeof value.showStats !== 'boolean') value.showStats = true;
     if (typeof value.autoRetry !== 'boolean') value.autoRetry = false;
     value.retryLimit = retryLimit(value.retryLimit);
+    value.minOutput = outputThreshold(value.minOutput);
     return value;
 }
 
@@ -170,8 +172,8 @@ async function finalizeMessage(messageId, type) {
         || JSON.stringify([message.mes, message.swipe_id ?? 0, message.gen_started]) !== originalReply) return;
     store(message, stats);
     renderMessage(messageId);
-    if (completed) autoRetry.consider(retryRun, messageId, message, stats.tps);
-    else autoRetry.status = '本轮未完整成功生成，不按超速删除或重试';
+    if (completed) autoRetry.consider(retryRun, messageId, message, stats.tps, stats.output);
+    else autoRetry.status = '本轮未完整成功生成，不自动删除或重试';
     Promise.resolve(ctx.saveChat?.()).catch(error => {
         console.warn('[Reply Token Stats] Could not persist message stats.', error);
     });
@@ -186,7 +188,7 @@ async function editBodyTags() {
     if (!ctx?.Popup || !ctx?.POPUP_TYPE) return;
     const current = settings();
     const status = autoRetry.status.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-    const popup = new ctx.Popup(`回复统计 v0.2.12 · 正文标签（空格分隔）<br><small>${status}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
+    const popup = new ctx.Popup(`回复统计 v0.2.13 · 正文标签（空格分隔）<br><small>${status}</small>`, ctx.POPUP_TYPE.INPUT, formatBodyTags(current.bodyTags), {
         placeholder: DEFAULT_BODY_TAGS,
         customInputs: [{
             id: 'reply-token-stats-show',
@@ -195,8 +197,12 @@ async function editBodyTags() {
             defaultState: current.showStats,
         }, {
             id: 'reply-token-stats-auto-retry',
-            label: '超过 80 自动删除并重生（会额外消耗 API）',
+            label: '流速 >80 或输出低于下方 token 阈值时自动重生（会额外消耗 API）',
             type: 'checkbox', defaultState: current.autoRetry,
+        }, {
+            id: 'reply-token-stats-min-output',
+            label: '输出少于多少 token 时重生（默认 3000；0 关闭此条件）',
+            type: 'number', min: 0, step: 1, defaultState: String(current.minOutput),
         }, {
             id: 'reply-token-stats-retry-limit',
             label: '每轮最多自动重试次数（不含最初回复）',
@@ -214,6 +220,13 @@ async function editBodyTags() {
         globalThis.toastr?.warning?.('重试次数请填写大于或等于 1 的整数；本次设置未保存。');
         return;
     }
+    const rawMinOutput = popup.inputResults?.get('reply-token-stats-min-output');
+    const minOutput = Number(rawMinOutput);
+    if (String(rawMinOutput ?? '').trim() === '' || rawMinOutput == null || !Number.isSafeInteger(minOutput) || minOutput < 0) {
+        globalThis.toastr?.warning?.('输出阈值请填写大于或等于 0 的整数；本次设置未保存。');
+        return;
+    }
+    current.minOutput = minOutput;
     current.retryLimit = limit;
     current.bodyTags = formatBodyTags(value);
     current.showStats = popup.inputResults?.get('reply-token-stats-show') !== false;
